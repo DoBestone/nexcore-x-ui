@@ -105,10 +105,18 @@ func gzipMiddleware() gin.HandlerFunc {
 		}
 		gz := acquireGzipWriter(c.Writer)
 		defer releaseGzipWriter(gz)
-		c.Writer = &gzipResponseWriter{ResponseWriter: c.Writer, gz: gz}
+		wrapper := &gzipResponseWriter{ResponseWriter: c.Writer, gz: gz}
+		c.Writer = wrapper
 		c.Header("Vary", "Accept-Encoding")
 		c.Next()
-		_ = gz.Close()
+		// 关键:Finalize 必须在 c.Next() 之后跑。它处理两种情况:
+		//   (A) 响应 ≥ 1KB,已经走 gzip 路径 → 关闭 gz stream(写 trailer)
+		//   (B) 响应 <  1KB,内容还在 wrapper.buffered 里没出去 → 直接以
+		//       未压缩明文写到 socket
+		// 之前只调 gz.Close() 漏了 (B),小响应(axios-init.js 这种几百字节的
+		// 静态文件 / dashboard 的 /server/status JSON)直接被吞掉,浏览器
+		// 看到 ERR_CONTENT_LENGTH_MISMATCH。
+		wrapper.Finalize()
 	}
 }
 
@@ -172,6 +180,21 @@ func (w *gzipResponseWriter) Flush() {
 		_ = w.gz.Flush()
 	}
 	w.ResponseWriter.Flush()
+}
+
+// Finalize is called by gzipMiddleware after the handler returns. It is the
+// only place where buffered (sub-threshold) responses get flushed AND the
+// gzip stream gets closed — gin doesn't call Flush() automatically on
+// non-streaming handlers, so without this small responses silently vanish.
+func (w *gzipResponseWriter) Finalize() {
+	if w.gzipped {
+		_ = w.gz.Close()
+		return
+	}
+	if len(w.buffered) > 0 {
+		_, _ = w.ResponseWriter.Write(w.buffered)
+		w.buffered = nil
+	}
 }
 
 func isCompressedContentType(ct string) bool {

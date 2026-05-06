@@ -29,3 +29,8 @@ bin/geosite.dat
 .sync*
 tmp/
 .claude/
+
+# AI 协作上下文(本地决策档案,不公开)
+CLAUDE.md
+.cursorrules
+.aider*
