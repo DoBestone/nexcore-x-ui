@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+{{template "head" .}}
+<body class="nx-login-bg">
+<a-layout id="app" v-cloak style="background: transparent;">
+    <transition name="list" appear>
+        <a-layout-content style="padding: 0;">
+            <a-row type="flex" justify="center" align="middle" style="min-height: 100vh; padding: 24px;">
+                <a-col :xs="22" :sm="18" :md="14" :lg="10" :xl="7" :xxl="6">
+                    <div class="nx-login-card">
+                        <h1 class="nx-login-title">{{ .title }}</h1>
+                        <p class="nx-login-sub">登录管理面板</p>
+                        <a-form>
+                            <a-form-item>
+                                <a-input v-model.trim="user.username" placeholder='{{ i18n "username" }}'
+                                         @keydown.enter.native="login" autofocus>
+                                    <a-icon slot="prefix" type="user"/>
+                                </a-input>
+                            </a-form-item>
+                            <a-form-item>
+                                <a-input type="password" v-model.trim="user.password"
+                                         placeholder='{{ i18n "password" }}' @keydown.enter.native="login">
+                                    <a-icon slot="prefix" type="lock"/>
+                                </a-input>
+                            </a-form-item>
+                            <a-form-item style="margin-top: 8px;">
+                                <a-button type="primary" block @click="login" :loading="loading">{{ i18n "login" }}</a-button>
+                            </a-form-item>
+                        </a-form>
+                    </div>
+                </a-col>
+            </a-row>
+        </a-layout-content>
+    </transition>
+</a-layout>
+{{template "js" .}}
+<script>
+    const app = new Vue({
+        delimiters: ['[[', ']]'],
+        el: '#app',
+        data: {
+            loading: false,
+            user: new User(),
+        },
+        methods: {
+            async login() {
+                this.loading = true;
+                const msg = await HttpUtil.post('/login', this.user);
+                this.loading = false;
+                if (msg.success) {
+                    location.href = basePath + 'xui/';
+                }
+            }
+        }
+    });
+</script>
+</body>
+</html>

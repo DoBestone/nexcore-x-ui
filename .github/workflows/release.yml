@@ -1,0 +1,117 @@
+name: release
+
+# Triggered by pushing a tag like v1.2.3 (or running manually). The job
+# cross-compiles linux binaries for the architectures we ship, packages
+# each into x-ui-linux-<arch>.tar.gz alongside the matching xray-core
+# binary + geoip/geosite, and uploads them all to the github release
+# whose name matches the tag.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required for softprops/action-gh-release
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            goarch: amd64
+            cc: x86_64-linux-gnu-gcc
+            apt: gcc-x86-64-linux-gnu
+            xray: Xray-linux-64.zip
+            xray_bin: xray-linux-amd64
+          - arch: arm64
+            goarch: arm64
+            cc: aarch64-linux-gnu-gcc
+            apt: gcc-aarch64-linux-gnu
+            xray: Xray-linux-arm64-v8a.zip
+            xray_bin: xray-linux-arm64
+          - arch: armv7
+            goarch: arm
+            goarm: '7'
+            cc: arm-linux-gnueabihf-gcc
+            apt: gcc-arm-linux-gnueabihf
+            xray: Xray-linux-arm32-v7a.zip
+            xray_bin: xray-linux-arm
+          - arch: s390x
+            goarch: s390x
+            cc: s390x-linux-gnu-gcc
+            apt: gcc-s390x-linux-gnu
+            xray: Xray-linux-s390x.zip
+            xray_bin: xray-linux-s390x
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: install cross compiler
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ${{ matrix.apt }} unzip wget
+
+      - name: build x-ui binary
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CC: ${{ matrix.cc }}
+        run: |
+          go build -trimpath -ldflags '-s -w -X main.buildTag=${{ github.ref_name }}' -o x-ui-bin main.go
+          mkdir -p stage/x-ui/bin
+          cp x-ui-bin           stage/x-ui/x-ui
+          cp x-ui.service       stage/x-ui/x-ui.service
+          cp x-ui.sh            stage/x-ui/x-ui.sh
+
+      - name: bundle xray + geo data
+        working-directory: stage/x-ui/bin
+        run: |
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/${{ matrix.xray }}
+          unzip -q ${{ matrix.xray }}
+          rm -f ${{ matrix.xray }} geoip.dat geosite.dat
+          wget -q https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
+          wget -q https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+          mv xray ${{ matrix.xray_bin }}
+          chmod +x ${{ matrix.xray_bin }}
+
+      - name: package
+        run: |
+          cd stage
+          tar -czf ../x-ui-linux-${{ matrix.arch }}.tar.gz x-ui
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-ui-linux-${{ matrix.arch }}
+          path: x-ui-linux-${{ matrix.arch }}.tar.gz
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: list artifacts
+        run: ls -la dist/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*.tar.gz

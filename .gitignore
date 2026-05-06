@@ -1,0 +1,30 @@
+# build artifacts
+/x-ui
+/x-ui-*
+/main
+/release.sh
+*.tar.gz
+*.test
+*.out
+dist/
+
+# data / runtime
+*.db
+*.db-journal
+install-info.txt
+# bin/* is populated at runtime by the install script (downloads xray-core
+# from XTLS) or by GitHub Actions during the release build. Do not check
+# binaries / geo data into git.
+bin/config.json
+bin/xray-darwin-*
+bin/xray-linux-*
+bin/xray-windows-*
+bin/geoip.dat
+bin/geosite.dat
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
+.sync*
+tmp/

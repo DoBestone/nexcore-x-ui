@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+{{template "head" .}}
+<style>
+    .ant-tabs-bar { margin: 0; }
+    .ant-tabs-top-bar { background: white; }
+    .api-tab-body { background: white; padding: 18px 20px; }
+    .token-row .token-plain {
+        font-family: var(--font-mono);
+        background: #fff7ed;
+        color: #b45309;
+        padding: 6px 8px;
+        border-radius: 6px;
+        word-break: break-all;
+    }
+    .docs-pre {
+        background: #0f172a;
+        color: #e2e8f0;
+        padding: 18px 20px;
+        border-radius: 12px;
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        line-height: 1.6;
+        max-height: 70vh;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+    }
+    .log-method {
+        font-family: var(--font-mono);
+        font-weight: 600;
+    }
+    .log-method.GET    { color: #047857; }
+    .log-method.POST   { color: #1d4ed8; }
+    .log-method.PUT    { color: #c2410c; }
+    .log-method.PATCH  { color: #c2410c; }
+    .log-method.DELETE { color: #b91c1c; }
+    .log-status { font-variant-numeric: tabular-nums; }
+</style>
+<body>
+<a-layout id="app" v-cloak>
+    {{ template "commonSider" . }}
+    <a-layout id="content-layout">
+        <a-layout-content>
+            <a-spin :spinning="spinning" :delay="200">
+                <a-tabs default-active-key="tokens" type="card">
+
+                    <!-- ============ Token 管理 ============ -->
+                    <a-tab-pane key="tokens" tab="API Token 管理">
+                        <div class="api-tab-body">
+                            <a-space style="margin-bottom: 12px">
+                                <a-input v-model="newToken.name" placeholder="给 token 起个名,例如 system-A"
+                                         style="width: 260px"></a-input>
+                                <a-button type="primary" @click="createToken"
+                                          :loading="newToken.loading">创建</a-button>
+                                <a-button @click="loadTokens">刷新</a-button>
+                            </a-space>
+
+                            <a-alert v-if="lastCreatedToken" type="warning"
+                                     show-icon style="margin-bottom: 12px">
+                                <span slot="message">
+                                    新 token 仅显示一次,请立即复制保存:
+                                </span>
+                                <span slot="description" class="token-plain">
+                                    [[ lastCreatedToken ]]
+                                </span>
+                            </a-alert>
+
+                            <a-table :columns="tokenCols" :data-source="tokens"
+                                     :row-key="r => r.id" :pagination="false" size="middle">
+                                <template slot="lastUsed" slot-scope="text, r">
+                                    <span v-if="r.lastUsedAt">[[ formatTime(r.lastUsedAt) ]]</span>
+                                    <span v-else style="color: #94a3b8">从未使用</span>
+                                </template>
+                                <template slot="revoked" slot-scope="text, r">
+                                    <a-tag :color="r.revoked ? 'red' : 'green'">
+                                        [[ r.revoked ? '已撤销' : '生效中' ]]
+                                    </a-tag>
+                                </template>
+                                <template slot="action" slot-scope="text, r">
+                                    <a-button v-if="!r.revoked" type="link" size="small"
+                                              @click="revokeToken(r)">撤销</a-button>
+                                    <a-button type="link" size="small" style="color: #b91c1c"
+                                              @click="deleteToken(r)">删除</a-button>
+                                </template>
+                            </a-table>
+                        </div>
+                    </a-tab-pane>
+
+                    <!-- ============ 调用日志 ============ -->
+                    <a-tab-pane key="logs" tab="调用日志">
+                        <div class="api-tab-body">
+                            <a-space style="margin-bottom: 12px" wrap>
+                                <a-input v-model="logFilter.path" placeholder="路径模糊匹配"
+                                         style="width: 200px"></a-input>
+                                <a-select v-model="logFilter.method" allow-clear placeholder="方法"
+                                          style="width: 110px">
+                                    <a-select-option value="GET">GET</a-select-option>
+                                    <a-select-option value="POST">POST</a-select-option>
+                                    <a-select-option value="PUT">PUT</a-select-option>
+                                    <a-select-option value="PATCH">PATCH</a-select-option>
+                                    <a-select-option value="DELETE">DELETE</a-select-option>
+                                </a-select>
+                                <a-input v-model="logFilter.token" placeholder="Token 名"
+                                         style="width: 160px"></a-input>
+                                <a-button type="primary" @click="loadLogs">查询</a-button>
+                                <a-button @click="resetLogFilter">重置</a-button>
+                                <a-popconfirm title="清空 14 天前的所有日志?" ok-text="确定"
+                                              cancel-text="取消" @confirm="purgeLogs">
+                                    <a-button>清理 14 天前</a-button>
+                                </a-popconfirm>
+                            </a-space>
+
+                            <a-table :columns="logCols" :data-source="logs"
+                                     :row-key="r => r.id" :pagination="logPagination"
+                                     size="middle" @change="onLogPaginate">
+                                <template slot="at" slot-scope="text, r">
+                                    [[ formatTime(r.at) ]]
+                                </template>
+                                <template slot="method" slot-scope="text, r">
+                                    <span class="log-method" :class="r.method">[[ r.method ]]</span>
+                                </template>
+                                <template slot="status" slot-scope="text, r">
+                                    <span class="log-status"
+                                          :style="{ color: r.status >= 500 ? '#b91c1c' :
+                                                            r.status >= 400 ? '#c2410c' :
+                                                            r.status >= 300 ? '#92400e' : '#047857' }">
+                                        [[ r.status ]]
+                                    </span>
+                                </template>
+                                <template slot="duration" slot-scope="text, r">
+                                    <span style="font-variant-numeric: tabular-nums;">
+                                        [[ r.durationMs ]] ms
+                                    </span>
+                                </template>
+                                <template slot="token" slot-scope="text, r">
+                                    <span v-if="r.tokenName">[[ r.tokenName ]]</span>
+                                    <span v-else style="color: #94a3b8">-</span>
+                                </template>
+                            </a-table>
+                        </div>
+                    </a-tab-pane>
+
+                    <!-- ============ API 文档 ============ -->
+                    <a-tab-pane key="docs" tab="API 文档">
+                        <div class="api-tab-body">
+                            <a-space style="margin-bottom: 12px">
+                                <a-button @click="loadDocs" icon="reload">重新加载</a-button>
+                                <a-button @click="copyDocs" icon="copy">复制全文</a-button>
+                                <a-button type="link" :href="basePath + 'xui/api/docs'" target="_blank">
+                                    在新窗口打开 markdown 原文
+                                </a-button>
+                            </a-space>
+                            <pre class="docs-pre">[[ docsText || '加载中...' ]]</pre>
+                        </div>
+                    </a-tab-pane>
+                </a-tabs>
+            </a-spin>
+        </a-layout-content>
+    </a-layout>
+</a-layout>
+{{template "js" .}}
+<script>
+const basePath = '{{ .base_path }}';
+
+const app = new Vue({
+    delimiters: ['[[', ']]'],
+    el: '#app',
+    data: {
+        siderDrawer,
+        spinning: false,
+        basePath,
+
+        tokens: [],
+        newToken: { name: '', loading: false },
+        lastCreatedToken: '',
+        tokenCols: [
+            { title: 'ID',       dataIndex: 'id',         width: 60 },
+            { title: '名称',     dataIndex: 'name' },
+            { title: '创建时间', scopedSlots: { customRender: 'createdAt' },
+              customRender: (text, r) => new Date(r.createdAt * 1000).toLocaleString() },
+            { title: '最后使用', scopedSlots: { customRender: 'lastUsed' } },
+            { title: '状态',     scopedSlots: { customRender: 'revoked' }, width: 100 },
+            { title: '操作',     scopedSlots: { customRender: 'action' },  width: 140 },
+        ],
+
+        logs: [],
+        logFilter: { path: '', method: undefined, token: '' },
+        logPagination: { current: 1, pageSize: 50, total: 0, showSizeChanger: false },
+        logCols: [
+            { title: '时间',   scopedSlots: { customRender: 'at' },       width: 170 },
+            { title: 'Method', scopedSlots: { customRender: 'method' },   width: 80 },
+            { title: '路径',   dataIndex: 'path' },
+            { title: '状态',   scopedSlots: { customRender: 'status' },   width: 70 },
+            { title: '耗时',   scopedSlots: { customRender: 'duration' }, width: 90 },
+            { title: 'Token',  scopedSlots: { customRender: 'token' },    width: 120 },
+            { title: 'IP',     dataIndex: 'ip',                           width: 130 },
+        ],
+
+        docsText: '',
+    },
+    methods: {
+        formatTime(unix) {
+            if (!unix) return '';
+            return new Date(unix * 1000).toLocaleString();
+        },
+
+        // ---------- tokens ----------
+        async loadTokens() {
+            this.spinning = true;
+            const msg = await HttpUtil.get('/xui/api/tokens');
+            this.spinning = false;
+            if (msg.success) this.tokens = msg.obj || [];
+        },
+        async createToken() {
+            if (!this.newToken.name) {
+                this.$message.warning('请填写名称');
+                return;
+            }
+            this.newToken.loading = true;
+            const msg = await HttpUtil.post('/xui/api/tokens', { name: this.newToken.name });
+            this.newToken.loading = false;
+            if (msg.success && msg.obj) {
+                this.lastCreatedToken = msg.obj.token;
+                this.newToken.name = '';
+                await this.loadTokens();
+            }
+        },
+        async revokeToken(r) {
+            const msg = await HttpUtil.post('/xui/api/tokens/' + r.id + '/revoke');
+            if (msg.success) {
+                this.$message.success('已撤销');
+                await this.loadTokens();
+            }
+        },
+        async deleteToken(r) {
+            await new Promise(resolve => {
+                this.$confirm({
+                    title: '删除 token',
+                    content: '永久删除该 token,无法恢复。是否继续?',
+                    okText: '删除', okType: 'danger', cancelText: '取消',
+                    onOk: () => resolve(),
+                });
+            });
+            const msg = await HttpUtil.delete('/xui/api/tokens/' + r.id);
+            if (msg.success) {
+                this.$message.success('已删除');
+                await this.loadTokens();
+            }
+        },
+
+        // ---------- logs ----------
+        async loadLogs() {
+            this.spinning = true;
+            const params = new URLSearchParams();
+            if (this.logFilter.path)   params.set('path', this.logFilter.path);
+            if (this.logFilter.method) params.set('method', this.logFilter.method);
+            if (this.logFilter.token)  params.set('token', this.logFilter.token);
+            params.set('page', this.logPagination.current);
+            params.set('size', this.logPagination.pageSize);
+            const msg = await HttpUtil.get('/xui/api/logs?' + params.toString());
+            this.spinning = false;
+            if (msg.success && msg.obj) {
+                this.logs = msg.obj.items || [];
+                this.logPagination.total = msg.obj.total || 0;
+            }
+        },
+        resetLogFilter() {
+            this.logFilter = { path: '', method: undefined, token: '' };
+            this.logPagination.current = 1;
+            this.loadLogs();
+        },
+        onLogPaginate(p) {
+            this.logPagination.current = p.current;
+            this.loadLogs();
+        },
+        async purgeLogs() {
+            const msg = await HttpUtil.delete('/xui/api/logs');
+            if (msg.success) {
+                this.$message.success('已清理 ' + (msg.obj?.deleted ?? 0) + ' 条');
+                await this.loadLogs();
+            }
+        },
+
+        // ---------- docs ----------
+        async loadDocs() {
+            try {
+                const resp = await axios.get('/xui/api/docs', { responseType: 'text' });
+                this.docsText = resp.data;
+            } catch (e) {
+                this.docsText = '加载文档失败:' + e.message;
+            }
+        },
+        copyDocs() {
+            navigator.clipboard?.writeText(this.docsText)
+                .then(() => this.$message.success('已复制全文'))
+                .catch(() => this.$message.warning('请手动选择复制'));
+        },
+    },
+    async mounted() {
+        await this.loadTokens();
+        await this.loadLogs();
+        await this.loadDocs();
+    },
+});
+</script>
+</body>
+</html>
