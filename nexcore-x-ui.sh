@@ -155,6 +155,9 @@ cmd_update() {
         [[ -f "${INSTALL_DIR}/bin/config.json" ]] && keep="${INSTALL_DIR}/bin/config.json"
         rm -rf "${INSTALL_DIR}/bin"
         cp -a "${tmp}/${CMD_NAME}/bin" "${INSTALL_DIR}/bin"
+        # tarball 来自 CI runner(uid 1001),cp -a 保留了那个 uid。
+        # preflightBinary 要求 xray owner=root,否则拒绝启动。
+        chown -R root:root "${INSTALL_DIR}" 2>/dev/null || true
         chmod +x "${INSTALL_DIR}/bin/"* 2>/dev/null || true
         [[ -n "${keep}" ]] && cp "${keep}.bak" "${INSTALL_DIR}/bin/config.json" 2>/dev/null || true
     fi

@@ -88,6 +88,12 @@ h1, h2, h3, h4, h5,
 .ant-layout-sider {
     background: linear-gradient(180deg, #0f172a 0%, #111c2e 100%) !important;
     box-shadow: 1px 0 0 rgba(255, 255, 255, 0.04);
+    /* 让 sider 变成纵向 flex,这样底部 trigger 可以靠 margin-top:auto 稳定吸底,
+       不再依赖 antd 默认的 position:fixed(那个会脱离 sider,sider 没撑满
+       viewport 时 trigger 看起来"飘在 sider 外") */
+    display: flex !important;
+    flex-direction: column;
+    min-height: 100vh;
 }
 
 /* 侧边栏 LOGO 区(由 a-layout-sider 顶部留白替代) */
@@ -95,6 +101,20 @@ h1, h2, h3, h4, h5,
     background: transparent !important;
     border-right: 0 !important;
     padding: 8px 12px;
+}
+
+/* sider 的菜单容器:占满中间剩余高度,把 trigger 顶到底部 */
+.ant-layout-sider .ant-layout-sider-children {
+    flex: 1 1 auto;
+    min-height: 0;          /* 允许 flex 子项内部出现滚动 */
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* sider 自带的 has-trigger 会塞 padding-bottom: 48px 给 fixed trigger 让位,
+   我们用 flex 流式布局后不需要它,留着会在底部多出一条空白 */
+.ant-layout-sider.ant-layout-sider-has-trigger {
+    padding-bottom: 0 !important;
 }
 
 /* 菜单项:去掉默认蓝渐变 + 阴影,改"浅蓝底 + 蓝字 + 加粗" */
@@ -350,8 +370,15 @@ h1, h2, h3, h4, h5,
 }
 
 /* ---------- 12. Sider 底部折叠 trigger ---------- */
-/* a-layout-sider collapsible 自带底部按钮,这里调成跟 sider 渐变背景融合 */
+/* 默认 antd 给 trigger 上 `position:fixed; bottom:0; width:<sider-width>`,
+   依赖 viewport 而不是 sider — 在 #app 没撑满高度的页面会脱锚漂移。
+   这里强制改成 sider 内部静态流式布局,配合上面 sider 的 flex 容器,
+   margin-top:auto 把它推到 sider 末尾,无论 sider 多高都贴底。 */
 .ant-layout-sider .ant-layout-sider-trigger {
+    position: static !important;
+    width: auto !important;
+    margin-top: auto;
+    flex-shrink: 0;
     background: rgba(0, 0, 0, 0.28) !important;
     color: rgba(255, 255, 255, 0.65) !important;
     border-top: 1px solid rgba(255, 255, 255, 0.06);

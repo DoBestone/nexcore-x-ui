@@ -103,4 +103,46 @@
 <template v-if="inbound.canSniffing()">
     {{template "form/sniffing"}}
 </template>
+
+<!-- 高级:streamSettings 原文 JSON ============================================
+     2026 后的 xray-core 协议字段(REALITY / XHTTP / HTTPUpgrade / uTLS
+     fingerprint 等)还没在上面的 form 里全部铺开,但 streamSettings 本身就是
+     "原样透传给 xray" 的 JSON 字符串 —— 所以这个折叠面板让用户直接编辑这串
+     原文,任意 xray 支持的字段都能立刻用上。开启后会覆盖 form 拼出来的
+     streamSettings;后端的 dry-run 校验会兜底,写错也不会让其他入站挂掉。 -->
+<a-collapse style="margin-top: 12px;">
+    <a-collapse-panel header="高级:streamSettings 原文 JSON(REALITY / XHTTP / uTLS 等)">
+        <a-alert type="info" show-icon style="margin-bottom: 10px;">
+            <span slot="message">
+                启用此处 textarea 后,保存入站时会直接以这段 JSON 作为
+                streamSettings 提交,覆盖上方 form 字段。后端会用
+                <code>xray test</code> 校验;不通过会精确告诉你哪个字段错了。
+            </span>
+        </a-alert>
+        <a-form layout="inline" style="margin-bottom: 8px;">
+            <a-form-item label="启用原文模式">
+                <a-switch v-model="inModal.useRawStream"></a-switch>
+            </a-form-item>
+            <template v-if="inModal.useRawStream">
+                <a-form-item label="模板">
+                    <a-button-group>
+                        <a-button size="small" @click="loadStreamTemplate('reality')">VLESS + REALITY + Vision</a-button>
+                        <a-button size="small" @click="loadStreamTemplate('xhttp')">XHTTP</a-button>
+                        <a-button size="small" @click="loadStreamTemplate('httpupgrade')">HTTPUpgrade</a-button>
+                        <a-button size="small" @click="loadStreamTemplate('current')">从 form 同步当前</a-button>
+                    </a-button-group>
+                </a-form-item>
+            </template>
+        </a-form>
+        <a-input v-if="inModal.useRawStream" type="textarea" :rows="16"
+                 v-model="inModal.rawStreamSettings"
+                 placeholder='{"network":"tcp","security":"reality","realitySettings":{...}}'
+                 style="font-family: var(--font-mono); font-size: 12.5px;"></a-input>
+        <p v-if="inModal.useRawStream" style="color: #94a3b8; font-size: 12px; margin-top: 6px;">
+            REALITY 模板里的 privateKey / publicKey 需要你在节点上跑
+            <code class="mono">xray x25519</code> 生成 keypair,把
+            两个值分别填到对应字段;shortIds 是短随机十六进制串(8 字符或更短)。
+        </p>
+    </a-collapse-panel>
+</a-collapse>
 {{end}}

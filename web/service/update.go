@@ -225,6 +225,15 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 		_ = copyTree(src, filepath.Join(installRoot, sub))
 	}
 
+	// CI runner builds the tarball as uid 1001; tar / copyTree preserve that.
+	// xray.preflightBinary refuses to launch any binary not owned by root,
+	// which would loop "restart xray failed: ... owned by uid 1001 ..."
+	// every 30s. chown the whole install root to root after the swap so
+	// preflight passes on next reload. Best-effort — running as root is
+	// the only configuration where chown succeeds; non-root setups won't
+	// hit preflight anyway.
+	_ = chownRecursiveRoot(installRoot)
+
 	// Remove the .old backup; we trust the new binary now.
 	_ = os.Remove(binBackup)
 	_ = os.RemoveAll(tmpDir)
@@ -381,6 +390,21 @@ func sha256File(path string) (string, error) {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// chownRecursiveRoot walks `root` and chowns everything to uid 0 / gid 0.
+// Called after extracting a release tarball: GitHub Actions builds run as
+// uid 1001 and tar preserves that ownership, but xray.preflightBinary
+// requires the xray binary to be owned by root. Errors are swallowed —
+// running as non-root is fine, in that case preflight is a no-op too.
+func chownRecursiveRoot(root string) error {
+	return filepath.Walk(root, func(path string, _ os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		_ = os.Chown(path, 0, 0)
+		return nil
+	})
 }
 
 // repoCoordinates returns the GitHub owner/repo used for self-update. The

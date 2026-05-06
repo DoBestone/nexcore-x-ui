@@ -31,11 +31,15 @@
 - SQLite 在嵌入式场景**就是最优解**,不是穷人版
 - **驱动可选迁移**:`mattn/go-sqlite3`(CGO)→ `modernc.org/sqlite`(纯 Go),好处是 cross-compile 简化,代价是 10-20% 性能下降(1H1G 上感知不到)。**待定**,不急。
 
-### 3. 前端:**当前保持 Vue 2 + ant-design-vue 1.x**,2.0 版本再做 Vue 3 SPA
-- 现状:Go template + Vue 2.6.12 + ant-design-vue 1.7.2(非 SPA),~2200 行 HTML
+### 3. 前端:**当前保持 Go template + Vue 2(sprinkled),功能稳定后再做 Vue 3 SPA**
+- 现状:**不是 SPA**。`.html` 文件 = Go template + 内嵌 Vue 2 + ant-design-vue(CDN 式加载,无构建)。~2200 行 HTML 横跨 8 页。
+- 决策节奏(2026-05-07 多轮反复后定稿):
+  1. **先把 1.x 功能升级做完做稳**——版本号读取、token 改造、稳定性补丁优先
+  2. 功能稳定后**再单独立项**做 Vue 3 SPA,走分支不动 main
+  3. 不在功能开发期穿插重构(已经在本次会话里反复横跳过一次,**不要再来**)
 - Vue 3 SPA 完整迁移清单见:[`docs/vue3-spa-migration.md`](docs/vue3-spa-migration.md)
-- **不要走中间路线**(一半 SPA 一半 template)——鉴权/路由/资源会全部混乱
-- 触发重构的条件:UI 设计规范统一压力 / Vue 2 出现安全问题 / 移动端体验成阻塞点
+- **绝对不要走中间路线**(一半 SPA 一半 template)——鉴权/路由/资源会全部混乱
+- 触发立项的条件(任一即可):1.x 功能基本闭环 / Vue 2 出现安全问题 / 移动端体验成阻塞点 / nexcore-ui 设计规范统一压力
 
 ---
 

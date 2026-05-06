@@ -143,6 +143,10 @@ if [[ -d "${TMP}/${CMD_NAME}/bin" ]]; then
     fi
     rm -rf "${INSTALL_DIR}/bin"
     cp -a "${TMP}/${CMD_NAME}/bin" "${INSTALL_DIR}/bin"
+    # tarball 来自 GitHub Actions runner(uid 1001),解压后 owner 不是 root。
+    # binary 端的 preflightBinary() 强校验 xray owner == root,否则拒启,
+    # 所以这里强制把整个 install 目录 chown 回 root,避免每次升级都撞这个坑。
+    chown -R root:root "${INSTALL_DIR}" 2>/dev/null || true
     chmod +x "${INSTALL_DIR}/bin/"* 2>/dev/null || true
     [[ -n "${keep}" ]] && cp "${keep}" "${INSTALL_DIR}/bin/config.json"
 fi

@@ -286,7 +286,9 @@
                     port: inbound.port,
                     protocol: inbound.protocol,
                     settings: inbound.settings.toString(),
-                    streamSettings: inbound.stream.toString(),
+                    streamSettings: (inModal.useRawStream && inModal.rawStreamSettings)
+                    ? inModal.rawStreamSettings
+                    : inbound.stream.toString(),
                     sniffing: inbound.canSniffing() ? inbound.sniffing.toString() : '{}',
                 };
                 await this.submit('/xui/inbound/add', data, inModal);
@@ -304,7 +306,9 @@
                     port: inbound.port,
                     protocol: inbound.protocol,
                     settings: inbound.settings.toString(),
-                    streamSettings: inbound.stream.toString(),
+                    streamSettings: (inModal.useRawStream && inModal.rawStreamSettings)
+                    ? inModal.rawStreamSettings
+                    : inbound.stream.toString(),
                     sniffing: inbound.canSniffing() ? inbound.sniffing.toString() : '{}',
                 };
                 await this.submit(`/xui/inbound/update/${dbInbound.id}`, data, inModal);
