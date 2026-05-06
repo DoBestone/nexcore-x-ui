@@ -89,11 +89,15 @@ resolve_version() {
 }
 
 download_release() {
+    # NOTE: this function returns the downloaded path on stdout via the final
+    # `echo "${dest}"` so the caller can capture it with $(...). All progress
+    # / log output therefore MUST go to stderr (>&2), or the caller's variable
+    # will end up containing the log string concatenated with the path.
     local version="$1"
     local url="https://github.com/${GH_OWNER}/${GH_REPO}/releases/download/${version}/nexcore-x-ui-linux-${ARCH}.tar.gz"
     local dest="/tmp/nexcore-x-ui-${version}-${ARCH}.tar.gz"
-    echo -e "${green}下载:${plain} ${url}"
-    if ! curl -fSL --connect-timeout 10 -o "${dest}" "${url}"; then
+    echo -e "${green}下载:${plain} ${url}" >&2
+    if ! curl -fSL --connect-timeout 10 -o "${dest}" "${url}" >&2; then
         echo -e "${red}下载失败,请检查 release 是否存在${plain}" >&2
         exit 1
     fi
