@@ -59,11 +59,33 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version: '1.26'
+          # Explicit cache: setup-go v5+ defaults to true when go.sum
+          # exists, but pinning it removes ambiguity. Keys off go.sum
+          # so a deps change invalidates exactly when expected.
+          cache: true
 
       - name: install cross compiler
         run: |
           sudo apt-get update -y
           sudo apt-get install -y ${{ matrix.apt }} unzip wget
+
+      # Cache xray binary + geo data: each is ~30MB, doesn't change between
+      # our releases (we always grab Xray-core's :latest tag), and across
+      # 4 matrix legs we re-download the same content 4×. Hash key is by
+      # arch + month so a new xray major/geo refresh still rolls forward
+      # within a reasonable window without manual cache busts.
+      - name: cache xray + geo data
+        id: xraycache
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: |
+            stage/nexcore-x-ui/bin/${{ matrix.xray_bin }}
+            stage/nexcore-x-ui/bin/geoip.dat
+            stage/nexcore-x-ui/bin/geosite.dat
+          # Bump the cache version (`v1`) when xray-core has a breaking
+          # change you want to force-grab; month component handles slow
+          # rolls automatically.
+          key: xray-geo-v1-${{ matrix.arch }}-${{ format('{0}-{1}', github.event.repository.updated_at, matrix.xray) }}
 
       - name: build panel binary
         env:
@@ -80,6 +102,10 @@ jobs:
           cp nexcore-x-ui.sh        stage/nexcore-x-ui/nexcore-x-ui.sh
 
       - name: bundle xray + geo data
+        # Cache hit:已经有 xray + geo dat,跳过重新下载。Cache miss:全套
+        # 重新拉。注意 xray zip 里的 geoip.dat/geosite.dat 没 Loyalsoldier
+        # 那份完整,所以始终用后者覆盖。
+        if: steps.xraycache.outputs.cache-hit != 'true'
         working-directory: stage/nexcore-x-ui/bin
         run: |
           wget -q https://github.com/XTLS/Xray-core/releases/latest/download/${{ matrix.xray }}
