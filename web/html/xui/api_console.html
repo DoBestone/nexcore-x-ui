@@ -13,19 +13,6 @@
         border-radius: 6px;
         word-break: break-all;
     }
-    .docs-pre {
-        background: #0f172a;
-        color: #e2e8f0;
-        padding: 18px 20px;
-        border-radius: 12px;
-        font-family: var(--font-mono);
-        font-size: 12.5px;
-        line-height: 1.6;
-        max-height: 70vh;
-        overflow: auto;
-        white-space: pre-wrap;
-        word-break: break-all;
-    }
     .log-method {
         font-family: var(--font-mono);
         font-weight: 600;
@@ -36,6 +23,206 @@
     .log-method.PATCH  { color: #c2410c; }
     .log-method.DELETE { color: #b91c1c; }
     .log-status { font-variant-numeric: tabular-nums; }
+
+    /* ---------- API 文档样式(Apifox/Stripe 风格) ---------- */
+    .apidoc-layout {
+        display: grid;
+        grid-template-columns: 220px 1fr;
+        gap: 24px;
+        align-items: start;
+    }
+    .apidoc-toc {
+        position: sticky;
+        top: 16px;
+        max-height: calc(100vh - 100px);
+        overflow: auto;
+        border-right: 1px solid var(--nc-border-soft);
+        padding-right: 12px;
+        font-size: 13px;
+    }
+    .apidoc-toc-group {
+        margin-bottom: 14px;
+    }
+    .apidoc-toc-group > .label {
+        color: #94a3b8;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 4px;
+    }
+    .apidoc-toc-link {
+        display: block;
+        padding: 4px 8px;
+        border-radius: 6px;
+        color: var(--nc-text);
+        text-decoration: none;
+        cursor: pointer;
+        line-height: 1.5;
+    }
+    .apidoc-toc-link:hover { background: rgba(59,130,246,0.08); color: #1d4ed8; }
+    .apidoc-toc-link.active { background: rgba(59,130,246,0.12); color: #1d4ed8; font-weight: 600; }
+
+    .apidoc-content { min-width: 0; }
+    .apidoc-section { margin-bottom: 36px; }
+    .apidoc-group-title {
+        font-size: 22px;
+        font-weight: 700;
+        color: var(--nc-text);
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--nc-border-soft);
+        margin-bottom: 18px;
+    }
+    .apidoc-item {
+        padding: 16px 0 22px;
+        border-bottom: 1px dashed var(--nc-border-soft);
+    }
+    .apidoc-item:last-child { border-bottom: 0; }
+    .apidoc-item-title {
+        font-size: 17px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        color: var(--nc-text);
+    }
+    .apidoc-line {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 8px;
+    }
+    .apidoc-method {
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        font-weight: 700;
+        padding: 3px 9px;
+        border-radius: 4px;
+        letter-spacing: 0.5px;
+    }
+    .apidoc-method.GET    { background: #dbeafe; color: #1d4ed8; }
+    .apidoc-method.POST   { background: #d1fae5; color: #047857; }
+    .apidoc-method.PUT    { background: #fef3c7; color: #b45309; }
+    .apidoc-method.PATCH  { background: #ede9fe; color: #6d28d9; }
+    .apidoc-method.DELETE { background: #fee2e2; color: #b91c1c; }
+    .apidoc-path {
+        font-family: var(--font-mono);
+        font-size: 13.5px;
+        background: #f1f5f9;
+        color: #1e293b;
+        padding: 3px 8px;
+        border-radius: 4px;
+        word-break: break-all;
+    }
+    .apidoc-noauth {
+        font-size: 11px;
+        background: #fef3c7;
+        color: #92400e;
+        padding: 2px 8px;
+        border-radius: 10px;
+    }
+    .apidoc-desc {
+        color: #475569;
+        font-size: 13.5px;
+        line-height: 1.7;
+        margin: 6px 0 14px;
+    }
+    .apidoc-subtitle {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--nc-text);
+        margin: 14px 0 8px;
+    }
+
+    .apidoc-code {
+        position: relative;
+        background: #0f172a;
+        color: #e2e8f0;
+        padding: 16px 18px;
+        border-radius: 10px;
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        line-height: 1.65;
+        max-height: 420px;
+        overflow: auto;
+        white-space: pre;
+        border: 1px solid #1e293b;
+        box-shadow: 0 1px 3px rgba(15,23,42,0.06);
+    }
+    .apidoc-code-header {
+        background: #1e293b;
+        color: #94a3b8;
+        font-size: 12px;
+        padding: 8px 14px;
+        border-radius: 10px 10px 0 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    .apidoc-code-header + .apidoc-code {
+        border-radius: 0 0 10px 10px;
+        border-top: 0;
+    }
+    .apidoc-copy-btn {
+        background: transparent;
+        border: 1px solid rgba(148,163,184,0.3);
+        color: #cbd5e1;
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        cursor: pointer;
+    }
+    .apidoc-copy-btn:hover { background: rgba(255,255,255,0.05); color: #fff; }
+
+    .apidoc-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        background: #fafbfc;
+        border: 1px solid var(--nc-border-soft);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .apidoc-table th {
+        background: #f1f5f9;
+        text-align: left;
+        padding: 8px 12px;
+        color: #475569;
+        font-weight: 600;
+        font-size: 12px;
+        border-bottom: 1px solid var(--nc-border-soft);
+    }
+    .apidoc-table td {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--nc-border-soft);
+        vertical-align: top;
+        line-height: 1.6;
+    }
+    .apidoc-table tr:last-child td { border-bottom: 0; }
+    .apidoc-field {
+        font-family: var(--font-mono);
+        background: #ede9fe;
+        color: #6d28d9;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 12px;
+    }
+    .apidoc-type {
+        font-family: var(--font-mono);
+        color: #6d28d9;
+        font-size: 12px;
+    }
+    .apidoc-required {
+        font-size: 10.5px;
+        color: #b91c1c;
+        margin-left: 4px;
+        font-weight: 600;
+    }
+    .apidoc-search {
+        margin-bottom: 14px;
+    }
+    .apidoc-error-row td:first-child {
+        font-family: var(--font-mono);
+        color: #b91c1c;
+        font-size: 12px;
+    }
 </style>
 <body>
 <a-layout id="app" v-cloak>
@@ -144,14 +331,200 @@
                     <!-- ============ API 文档 ============ -->
                     <a-tab-pane key="docs" tab="API 文档">
                         <div class="api-tab-body">
-                            <a-space style="margin-bottom: 12px">
-                                <a-button @click="loadDocs" icon="reload">重新加载</a-button>
-                                <a-button @click="copyDocs" icon="copy">复制全文</a-button>
-                                <a-button type="link" :href="basePath + 'xui/api/docs'" target="_blank">
-                                    在新窗口打开 markdown 原文
-                                </a-button>
-                            </a-space>
-                            <pre class="docs-pre">[[ docsText || '加载中...' ]]</pre>
+
+                            <!-- 顶部说明 + 搜索 -->
+                            <div style="margin-bottom: 18px;">
+                                <h2 style="font-size: 24px; margin: 0 0 6px;">NexCore x-ui · REST API v1</h2>
+                                <p style="color: #475569; margin: 0 0 12px;">
+                                    基础路径:<code class="apidoc-path" style="font-size: 12.5px;">[[ apiBase ]]</code>。
+                                    除 <code class="apidoc-path" style="font-size: 12.5px;">/health</code> 外所有接口都需要鉴权。
+                                </p>
+                                <a-input v-model="apiQuery" class="apidoc-search"
+                                         placeholder="按接口名 / 路径 / 描述搜索…"
+                                         allow-clear style="max-width: 360px;">
+                                    <a-icon slot="prefix" type="search"></a-icon>
+                                </a-input>
+                            </div>
+
+                            <div class="apidoc-layout">
+                                <!-- 左侧目录 -->
+                                <nav class="apidoc-toc">
+                                    <div v-for="g in filteredGroups" :key="g.key" class="apidoc-toc-group">
+                                        <div class="label">[[ g.title ]]</div>
+                                        <a v-for="it in g.items" :key="it.key"
+                                           :href="'#api-' + it.key"
+                                           class="apidoc-toc-link">[[ it.title ]]</a>
+                                    </div>
+                                </nav>
+
+                                <!-- 右侧内容 -->
+                                <div class="apidoc-content">
+
+                                    <!-- 鉴权 + 响应格式 静态前导 -->
+                                    <section class="apidoc-section" id="api-overview">
+                                        <h2 class="apidoc-group-title">鉴权与响应格式</h2>
+                                        <div class="apidoc-item">
+                                            <div class="apidoc-item-title">鉴权方式(三选一)</div>
+                                            <p class="apidoc-desc">
+                                                token 在二进制首次启动时随机生成并写入日志("API token generated...")
+                                                ,丢失后调 <code class="apidoc-path" style="font-size:12px;">POST /settings/api-token/rotate</code>
+                                                重新生成,或在「API Token 管理」标签页创建多 token。
+                                            </p>
+                                            <table class="apidoc-table">
+                                                <thead><tr><th style="width:140px">方式</th><th>请求头 / 参数</th></tr></thead>
+                                                <tbody>
+                                                    <tr><td>推荐</td><td><code class="apidoc-path" style="font-size:12px;">Authorization: Bearer &lt;token&gt;</code></td></tr>
+                                                    <tr><td>备选</td><td><code class="apidoc-path" style="font-size:12px;">X-API-Token: &lt;token&gt;</code></td></tr>
+                                                    <tr><td>降级</td><td><code class="apidoc-path" style="font-size:12px;">?api_token=&lt;token&gt;</code> (URL query)</td></tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        <div class="apidoc-item">
+                                            <div class="apidoc-item-title">统一响应格式</div>
+                                            <div class="apidoc-subtitle">成功</div>
+                                            <pre class="apidoc-code">{ "data": &lt;object | array | null&gt; }</pre>
+                                            <div class="apidoc-subtitle">失败</div>
+                                            <pre class="apidoc-code">{
+  "error": true,
+  "code": "inbound_not_found",
+  "message": "...",
+  "details": &lt;any&gt;
+}</pre>
+                                        </div>
+                                    </section>
+
+                                    <!-- 动态 endpoint 渲染 -->
+                                    <section v-for="g in filteredGroups" :key="g.key"
+                                             :id="'group-' + g.key" class="apidoc-section">
+                                        <h2 class="apidoc-group-title">[[ g.title ]]</h2>
+
+                                        <div v-for="it in g.items" :key="it.key"
+                                             :id="'api-' + it.key" class="apidoc-item">
+                                            <div class="apidoc-item-title">[[ it.title ]]</div>
+
+                                            <div class="apidoc-line">
+                                                <span class="apidoc-method" :class="it.method">[[ it.method ]]</span>
+                                                <code class="apidoc-path">[[ it.path ]]</code>
+                                                <span v-if="it.auth === false" class="apidoc-noauth">无需鉴权</span>
+                                            </div>
+
+                                            <p v-if="it.desc" class="apidoc-desc">[[ it.desc ]]</p>
+
+                                            <template v-if="it.pathParams">
+                                                <div class="apidoc-subtitle">路径参数</div>
+                                                <table class="apidoc-table">
+                                                    <thead><tr><th style="width:160px">字段</th><th style="width:120px">类型</th><th>说明</th></tr></thead>
+                                                    <tbody>
+                                                        <tr v-for="p in it.pathParams">
+                                                            <td><code class="apidoc-field">[[ p.name ]]</code></td>
+                                                            <td><span class="apidoc-type">[[ p.type ]]</span></td>
+                                                            <td>[[ p.desc ]]</td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </template>
+
+                                            <template v-if="it.queryParams">
+                                                <div class="apidoc-subtitle">查询参数</div>
+                                                <table class="apidoc-table">
+                                                    <thead><tr><th style="width:160px">字段</th><th style="width:120px">类型</th><th style="width:80px">必填</th><th>说明</th></tr></thead>
+                                                    <tbody>
+                                                        <tr v-for="p in it.queryParams">
+                                                            <td><code class="apidoc-field">[[ p.name ]]</code></td>
+                                                            <td><span class="apidoc-type">[[ p.type ]]</span></td>
+                                                            <td>[[ p.required ? '是' : '否' ]]</td>
+                                                            <td>[[ p.desc ]]</td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </template>
+
+                                            <template v-if="it.body">
+                                                <div class="apidoc-subtitle">请求体示例</div>
+                                                <div class="apidoc-code-header">
+                                                    <span>application/json</span>
+                                                    <button class="apidoc-copy-btn"
+                                                            @click="copyBlock(it.body)">复制</button>
+                                                </div>
+                                                <pre class="apidoc-code">[[ formatJson(it.body) ]]</pre>
+                                            </template>
+
+                                            <template v-if="it.bodyFields">
+                                                <div class="apidoc-subtitle">请求体字段</div>
+                                                <table class="apidoc-table">
+                                                    <thead><tr><th style="width:200px">字段</th><th style="width:140px">类型</th><th style="width:80px">必填</th><th>说明</th></tr></thead>
+                                                    <tbody>
+                                                        <tr v-for="p in it.bodyFields">
+                                                            <td><code class="apidoc-field">[[ p.name ]]</code></td>
+                                                            <td><span class="apidoc-type">[[ p.type ]]</span></td>
+                                                            <td>[[ p.required ? '是' : '否' ]]</td>
+                                                            <td>[[ p.desc ]]</td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </template>
+
+                                            <template v-if="it.response !== undefined">
+                                                <div class="apidoc-subtitle">响应示例</div>
+                                                <div class="apidoc-code-header">
+                                                    <span v-if="it.responseRaw">[[ it.responseContentType || 'text/plain' ]]</span>
+                                                    <span v-else>{ "data": ... }</span>
+                                                    <button class="apidoc-copy-btn"
+                                                            @click="copyBlock(it.responseRaw ? it.response : { data: it.response })">复制</button>
+                                                </div>
+                                                <pre class="apidoc-code">[[ it.responseRaw ? it.response : formatJson({ data: it.response }) ]]</pre>
+                                            </template>
+
+                                            <template v-if="it.responseFields">
+                                                <div class="apidoc-subtitle">响应字段说明</div>
+                                                <table class="apidoc-table">
+                                                    <thead><tr><th style="width:240px">字段</th><th style="width:140px">类型</th><th>说明</th></tr></thead>
+                                                    <tbody>
+                                                        <tr v-for="p in it.responseFields">
+                                                            <td><code class="apidoc-field">[[ p.name ]]</code></td>
+                                                            <td><span class="apidoc-type">[[ p.type ]]</span></td>
+                                                            <td>[[ p.desc ]]</td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </template>
+
+                                            <template v-if="it.errors">
+                                                <div class="apidoc-subtitle">错误码</div>
+                                                <table class="apidoc-table">
+                                                    <thead><tr><th style="width:240px">code</th><th>含义</th></tr></thead>
+                                                    <tbody>
+                                                        <tr v-for="e in it.errors" class="apidoc-error-row">
+                                                            <td>[[ e.code ]]</td>
+                                                            <td>[[ e.desc ]]</td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </template>
+
+                                            <template v-if="it.example">
+                                                <div class="apidoc-subtitle">curl 示例</div>
+                                                <div class="apidoc-code-header">
+                                                    <span>shell</span>
+                                                    <button class="apidoc-copy-btn"
+                                                            @click="copyText(it.example)">复制</button>
+                                                </div>
+                                                <pre class="apidoc-code">[[ it.example ]]</pre>
+                                            </template>
+
+                                        </div>
+                                    </section>
+
+                                    <div v-if="filteredGroups.length === 0" style="text-align: center; padding: 60px; color: #94a3b8;">
+                                        没有匹配的接口
+                                    </div>
+
+                                    <div style="margin-top: 24px; color: #94a3b8; font-size: 12px;">
+                                        想看完整 markdown 原文?
+                                        <a :href="basePath + 'xui/api/docs'" target="_blank">点击在新窗口打开</a>。
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </a-tab-pane>
                 </a-tabs>
@@ -160,6 +533,7 @@
     </a-layout>
 </a-layout>
 {{template "js" .}}
+{{template "apiDocsData" .}}
 <script>
 const app = new Vue({
     delimiters: ['[[', ']]'],
@@ -168,6 +542,7 @@ const app = new Vue({
         siderDrawer,
         spinning: false,
         basePath: basePath,
+        apiBase: (location.origin + basePath + 'api/v1').replace(/\/+$/, ''),
 
         tokens: [],
         newToken: { name: '', loading: false },
@@ -195,12 +570,35 @@ const app = new Vue({
             { title: 'IP',     dataIndex: 'ip',                           width: 130 },
         ],
 
-        docsText: '',
+        // API 文档:metadata 来自 {{template "apiDocsData"}} 注入的全局 apiDocs
+        apiDocs: (typeof apiDocs !== 'undefined') ? apiDocs : { groups: [] },
+        apiQuery: '',
+    },
+    computed: {
+        filteredGroups() {
+            const q = (this.apiQuery || '').trim().toLowerCase();
+            if (!q) return this.apiDocs.groups;
+            const out = [];
+            for (const g of this.apiDocs.groups) {
+                const items = g.items.filter(it =>
+                    (it.title  || '').toLowerCase().includes(q) ||
+                    (it.path   || '').toLowerCase().includes(q) ||
+                    (it.desc   || '').toLowerCase().includes(q) ||
+                    (it.method || '').toLowerCase() === q
+                );
+                if (items.length) out.push(Object.assign({}, g, { items }));
+            }
+            return out;
+        },
     },
     methods: {
         formatTime(unix) {
             if (!unix) return '';
             return new Date(unix * 1000).toLocaleString();
+        },
+        formatJson(o) {
+            try { return JSON.stringify(o, null, 2); }
+            catch (e) { return String(o); }
         },
 
         // ---------- tokens ----------
@@ -280,25 +678,20 @@ const app = new Vue({
             }
         },
 
-        // ---------- docs ----------
-        async loadDocs() {
-            try {
-                const resp = await axios.get('/xui/api/docs', { responseType: 'text' });
-                this.docsText = resp.data;
-            } catch (e) {
-                this.docsText = '加载文档失败:' + e.message;
-            }
+        // ---------- docs helpers ----------
+        copyBlock(o) {
+            const text = (typeof o === 'string') ? o : this.formatJson(o);
+            this.copyText(text);
         },
-        copyDocs() {
-            navigator.clipboard?.writeText(this.docsText)
-                .then(() => this.$message.success('已复制全文'))
+        copyText(text) {
+            navigator.clipboard?.writeText(text)
+                .then(() => this.$message.success('已复制'))
                 .catch(() => this.$message.warning('请手动选择复制'));
         },
     },
     async mounted() {
         await this.loadTokens();
         await this.loadLogs();
-        await this.loadDocs();
     },
 });
 </script>

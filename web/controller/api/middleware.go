@@ -14,13 +14,18 @@ import (
 const (
 	bearerPrefix = "Bearer "
 	headerToken  = "X-API-Token"
-	queryToken   = "api_token"
 )
 
-// AuthMiddleware accepts a token via Authorization: Bearer <t>, X-API-Token,
-// or ?api_token=. It first checks the multi-token table (api_tokens); on miss
-// it falls back to the legacy single token stored in settings.apiToken so
-// existing deployments keep working.
+// AuthMiddleware accepts a token via Authorization: Bearer <t> or
+// X-API-Token. The query-string transport (?api_token=) was intentionally
+// removed: it leaked the secret into access logs, browser history, and
+// any HTTP-aware proxy along the path. Callers that previously passed
+// the token in the URL must move it to a header.
+//
+// The middleware first checks the multi-token table (api_tokens), where
+// values are stored as SHA256 hashes; on miss it falls back to the
+// legacy single token stored in settings.apiToken so existing
+// deployments keep working.
 func AuthMiddleware(settings *service.SettingService, tokens *service.APITokenService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		got := extractToken(c)
@@ -60,9 +65,6 @@ func extractToken(c *gin.Context) string {
 	}
 	if h := c.GetHeader(headerToken); h != "" {
 		return strings.TrimSpace(h)
-	}
-	if q := c.Query(queryToken); q != "" {
-		return strings.TrimSpace(q)
 	}
 	return ""
 }

@@ -2,7 +2,11 @@ package service
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +22,22 @@ import (
 
 	"nexcore-x-ui/config"
 )
+
+// maxTarballSize caps the download to avoid a malicious release filling
+// /tmp. Real binaries are ~30MB; 256MB is a generous ceiling.
+const maxTarballSize = 256 * 1024 * 1024
+
+// maxChecksumsSize caps checksums.txt at 64KB. The real file is ~300B.
+const maxChecksumsSize = 64 * 1024
+
+// ErrChecksumMismatch is returned when the downloaded tarball's SHA256
+// doesn't match the value in checksums.txt for that asset.
+var ErrChecksumMismatch = errors.New("update: tarball checksum mismatch")
+
+// ErrChecksumMissing is returned when checksums.txt is missing from the
+// release or doesn't contain an entry for the asset we downloaded. We
+// fail closed: a release without checksums is treated as untrusted.
+var ErrChecksumMissing = errors.New("update: release has no checksums.txt entry for this asset")
 
 // updateCheckCacheTTL avoids hammering the GitHub API every time the dashboard
 // mounts. 5 minutes is long enough to keep panel navigation snappy and short
@@ -112,8 +132,8 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 		return nil, err
 	}
 
-	asset := s.pickAsset(r)
-	if asset == "" {
+	assetURL, assetName := s.pickAsset(r)
+	if assetURL == "" {
 		return nil, fmt.Errorf("no asset for arch %s in release %s", runtime.GOARCH, r.TagName)
 	}
 
@@ -123,8 +143,16 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 		return nil, err
 	}
 	tarballPath := filepath.Join(tmpDir, "x-ui.tar.gz")
-	if err := downloadFile(asset, tarballPath); err != nil {
+	if err := downloadFile(assetURL, tarballPath); err != nil {
 		return nil, fmt.Errorf("download: %w", err)
+	}
+
+	// Verify SHA256 against checksums.txt published in the same release.
+	// We fail closed: any error here aborts the upgrade with the new
+	// binary never installed. checksums.txt is mandatory — a release
+	// missing it is treated as untrusted.
+	if err := verifyTarballChecksum(r, assetName, tarballPath); err != nil {
+		return nil, fmt.Errorf("verify: %w", err)
 	}
 
 	// Extract.
@@ -242,7 +270,10 @@ func (s *UpdateService) fetchRelease(url string) (*ReleaseInfo, error) {
 	return r, nil
 }
 
-func (s *UpdateService) pickAsset(r *ReleaseInfo) string {
+// pickAsset returns the (download URL, asset filename) for the tarball
+// matching the running architecture. The filename is needed to look up
+// the SHA256 in checksums.txt.
+func (s *UpdateService) pickAsset(r *ReleaseInfo) (url, name string) {
 	// Match the workflow's archive name first; fall back to legacy x-ui
 	// naming so forks that haven't renamed yet still self-update.
 	preferred := []string{
@@ -252,7 +283,7 @@ func (s *UpdateService) pickAsset(r *ReleaseInfo) string {
 	for _, want := range preferred {
 		for _, a := range r.Assets {
 			if a.Name == want {
-				return a.BrowserDownloadURL
+				return a.BrowserDownloadURL, a.Name
 			}
 		}
 	}
@@ -260,10 +291,91 @@ func (s *UpdateService) pickAsset(r *ReleaseInfo) string {
 	suffix := fmt.Sprintf("linux-%s.tar.gz", runtime.GOARCH)
 	for _, a := range r.Assets {
 		if strings.HasSuffix(a.Name, suffix) {
-			return a.BrowserDownloadURL
+			return a.BrowserDownloadURL, a.Name
+		}
+	}
+	return "", ""
+}
+
+// verifyTarballChecksum downloads the release's checksums.txt asset,
+// looks up the entry for assetName, and compares it to the SHA256 of the
+// already-downloaded tarball at tarballPath. Returns nil only on
+// constant-time match.
+func verifyTarballChecksum(r *ReleaseInfo, assetName, tarballPath string) error {
+	var checksumsURL string
+	for _, a := range r.Assets {
+		if a.Name == "checksums.txt" {
+			checksumsURL = a.BrowserDownloadURL
+			break
+		}
+	}
+	if checksumsURL == "" {
+		return ErrChecksumMissing
+	}
+
+	resp, err := http.Get(checksumsURL)
+	if err != nil {
+		return fmt.Errorf("fetch checksums.txt: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("fetch checksums.txt: http %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxChecksumsSize))
+	if err != nil {
+		return fmt.Errorf("read checksums.txt: %w", err)
+	}
+
+	want := lookupChecksum(string(body), assetName)
+	if want == "" {
+		return ErrChecksumMissing
+	}
+
+	got, err := sha256File(tarballPath)
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.ToLower(want)), []byte(got)) != 1 {
+		return ErrChecksumMismatch
+	}
+	return nil
+}
+
+// lookupChecksum parses the GNU `sha256sum` output format, lines of the
+// form "<hex>  <name>" (two spaces, binary mode is "<hex> *<name>"),
+// returning the hex digest for assetName or "" if absent. It tolerates
+// different whitespace and the optional "*" mode marker.
+func lookupChecksum(body, assetName string) string {
+	scanner := bufio.NewScanner(strings.NewReader(body))
+	scanner.Buffer(make([]byte, 0, 4096), 1<<20)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		name := strings.TrimPrefix(fields[len(fields)-1], "*")
+		if name == assetName {
+			return strings.ToLower(fields[0])
 		}
 	}
 	return ""
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func fileExists(p string) bool {
@@ -301,7 +413,8 @@ func downloadFile(url, dst string) error {
 		return err
 	}
 	defer out.Close()
-	_, err = io.Copy(out, resp.Body)
+	// Cap the download. A truncated body fails the SHA256 check downstream.
+	_, err = io.Copy(out, io.LimitReader(resp.Body, maxTarballSize))
 	return err
 }
 
@@ -316,6 +429,12 @@ func extractTarGz(archive, dst string) error {
 		return err
 	}
 	defer gz.Close()
+	// Resolve dst once so HasPrefix checks work even when the caller
+	// passes a non-canonical path.
+	dstAbs, err := filepath.Abs(filepath.Clean(dst))
+	if err != nil {
+		return err
+	}
 	tr := tar.NewReader(gz)
 	for {
 		h, err := tr.Next()
@@ -325,12 +444,20 @@ func extractTarGz(archive, dst string) error {
 		if err != nil {
 			return err
 		}
-		// Block path traversal.
+		// Reject absolute paths and any name that doesn't resolve to a
+		// path strictly under dst. This catches "/etc/passwd",
+		// "../escape", and anything else that filepath.Clean keeps in
+		// the parent. We also drop hard links and symbolic links —
+		// even an in-tree symlink can be followed during a later write
+		// to escape the extraction root.
 		clean := filepath.Clean(h.Name)
-		if strings.HasPrefix(clean, "..") || strings.Contains(clean, "/../") {
-			continue
+		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+			return fmt.Errorf("tar: rejected entry %q (path traversal)", h.Name)
 		}
-		out := filepath.Join(dst, clean)
+		out := filepath.Join(dstAbs, clean)
+		if !strings.HasPrefix(out+string(os.PathSeparator), dstAbs+string(os.PathSeparator)) && out != dstAbs {
+			return fmt.Errorf("tar: rejected entry %q (escapes destination)", h.Name)
+		}
 		switch h.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(out, 0o755); err != nil {
@@ -344,11 +471,16 @@ func extractTarGz(archive, dst string) error {
 			if err != nil {
 				return err
 			}
-			if _, err := io.Copy(w, tr); err != nil {
+			if _, err := io.Copy(w, io.LimitReader(tr, maxTarballSize)); err != nil {
 				w.Close()
 				return err
 			}
 			w.Close()
+		case tar.TypeSymlink, tar.TypeLink:
+			return fmt.Errorf("tar: rejected entry %q (symlink/hardlink not allowed)", h.Name)
+		default:
+			// Skip device/fifo/etc. — release tarballs never contain these.
+			continue
 		}
 	}
 }

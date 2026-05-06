@@ -80,7 +80,9 @@ fi
 
 # ---------- download ----------
 
-URL="https://github.com/${GH_OWNER}/${GH_REPO}/releases/download/${TARGET}/nexcore-x-ui-linux-${ARCH}.tar.gz"
+PKG_NAME="nexcore-x-ui-linux-${ARCH}.tar.gz"
+URL="https://github.com/${GH_OWNER}/${GH_REPO}/releases/download/${TARGET}/${PKG_NAME}"
+SUM_URL="https://github.com/${GH_OWNER}/${GH_REPO}/releases/download/${TARGET}/checksums.txt"
 TMP=$(mktemp -d -t nexcore-update.XXXXXX)
 trap 'rm -rf "${TMP}"' EXIT
 
@@ -89,6 +91,32 @@ if ! curl -fSL --connect-timeout 10 -o "${TMP}/pkg.tar.gz" "${URL}"; then
     echo -e "${red}下载失败,请检查 release ${TARGET} 是否存在${plain}" >&2
     exit 1
 fi
+
+# ---------- verify SHA256 ----------
+# checksums.txt 是 release 必备文件;缺失 / 不匹配则中止,以阻止任何中间人或
+# release 资产被替换的攻击。需要 sha256sum(coreutils);busybox 也支持。
+echo -e "${green}校验 SHA256…${plain}"
+if ! curl -fSL --connect-timeout 10 -o "${TMP}/checksums.txt" "${SUM_URL}"; then
+    echo -e "${red}下载 checksums.txt 失败 — release ${TARGET} 缺少校验文件,拒绝继续${plain}" >&2
+    exit 1
+fi
+if ! command -v sha256sum >/dev/null 2>&1; then
+    echo -e "${red}本机缺少 sha256sum,无法校验,拒绝继续${plain}" >&2
+    exit 1
+fi
+EXPECTED=$(awk -v want="${PKG_NAME}" '$2 == want || $2 == "*"want {print $1; exit}' "${TMP}/checksums.txt")
+if [[ -z "${EXPECTED}" ]]; then
+    echo -e "${red}checksums.txt 中找不到 ${PKG_NAME} 的条目${plain}" >&2
+    exit 1
+fi
+ACTUAL=$(sha256sum "${TMP}/pkg.tar.gz" | awk '{print $1}')
+if [[ "${EXPECTED}" != "${ACTUAL}" ]]; then
+    echo -e "${red}SHA256 不匹配!${plain}" >&2
+    echo -e "${red}  expected: ${EXPECTED}${plain}" >&2
+    echo -e "${red}  actual:   ${ACTUAL}${plain}" >&2
+    exit 1
+fi
+echo -e "${green}  SHA256 OK: ${ACTUAL}${plain}"
 
 # ---------- extract + sanity ----------
 

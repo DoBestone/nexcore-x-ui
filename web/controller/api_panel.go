@@ -76,10 +76,10 @@ func (a *APIPanelController) createToken(c *gin.Context) {
 		return
 	}
 	jsonObj(c, gin.H{
-		"id":        t.Id,
-		"name":      t.Name,
-		"token":     t.Token, // plaintext, exposed once
-		"createdAt": t.CreatedAt,
+		"id":        t.Row.Id,
+		"name":      t.Row.Name,
+		"token":     t.Plaintext, // plaintext, exposed once; DB stores SHA256
+		"createdAt": t.Row.CreatedAt,
 	}, nil)
 }
 

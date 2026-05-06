@@ -413,8 +413,13 @@ func (s *Server) Start() (err error) {
 			listener.Close()
 			return err
 		}
+		// MinVersion locked to 1.2 — TLS 1.0/1.1 are deprecated and have
+		// known weaknesses (BEAST, POODLE, weak hash for handshake).
+		// CipherSuites is left nil so Go's default secure-by-default
+		// list applies for TLS 1.2; TLS 1.3 ignores the field.
 		c := &tls.Config{
 			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
 		}
 		listener = network.NewAutoHttpsListener(listener)
 		listener = tls.NewListener(listener, c)

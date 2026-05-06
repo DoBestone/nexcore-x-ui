@@ -12,7 +12,11 @@
 #   nexcore-x-ui <command>    直接执行
 #   nexcore-x-ui help         所有命令
 #   nexcore-x-ui help <cmd>   单条命令的详情
-set -eo pipefail
+# `set -u` (nounset) catches accidental rm -rf "${UNSET_VAR}" / similar
+# expansions that could nuke unrelated paths. pipefail makes piped failures
+# visible. Together they're strict but match the safety the CLI demands —
+# the panel runs as root.
+set -euo pipefail
 
 # ---------- defaults (env-overridable) ----------
 
@@ -173,7 +177,12 @@ cmd_uninstall() {
     systemctl stop    "${SERVICE_NAME}" 2>/dev/null || true
     systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
     rm -f  "${SERVICE_FILE}" "/usr/bin/${CMD_NAME}"
-    rm -rf "${INSTALL_DIR}" "${DATA_DIR}"
+    # Guard the rm -rf behind explicit non-empty paths so an unset env
+    # never expands to `rm -rf /`. require_installed already gates this,
+    # but defense-in-depth is cheap.
+    [[ -n "${INSTALL_DIR}" && "${INSTALL_DIR}" != "/" ]] && rm -rf "${INSTALL_DIR}"
+    [[ -n "${DATA_DIR}"    && "${DATA_DIR}"    != "/" ]] && rm -rf "${DATA_DIR}"
+    rm -rf "/etc/systemd/system/${CMD_NAME}.service.d"
     systemctl daemon-reload
     ok "已卸载"
 }
@@ -204,14 +213,32 @@ cmd_reset() {
     systemctl stop "${SERVICE_NAME}"
     rm -f "${INFO_FILE}"
     if command -v sqlite3 >/dev/null 2>&1; then
-        sqlite3 "${DB_FILE}" "DELETE FROM settings WHERE key='webPort'; DELETE FROM users;" 2>/dev/null || true
+        # Wrap in a single transaction so we never leave the DB in a
+        # half-cleared state (e.g. users table empty but webPort still
+        # set) which would prevent first-run setup from regenerating
+        # both. `set -e` upstream catches the sqlite3 non-zero exit.
+        if ! sqlite3 "${DB_FILE}" <<'SQL'
+BEGIN;
+DELETE FROM settings WHERE key='webPort';
+DELETE FROM users;
+COMMIT;
+SQL
+        then
+            err "数据库重置失败 — 检查 ${DB_FILE} 是否完整"
+            systemctl start "${SERVICE_NAME}"
+            return 1
+        fi
     else
         warn "sqlite3 不存在,直接删除整库以触发首次初始化"
         rm -f "${DB_FILE}"
     fi
     systemctl start "${SERVICE_NAME}"
     sleep 2
-    [[ -f "${INFO_FILE}" ]] && cat "${INFO_FILE}"
+    if [[ -f "${INFO_FILE}" ]]; then
+        cat "${INFO_FILE}"
+    else
+        warn "未生成 install-info.txt — 用 'journalctl -u ${SERVICE_NAME} -n 50' 查看启动日志"
+    fi
 }
 
 cmd_passwd() {
@@ -233,6 +260,8 @@ cmd_port() {
         return
     fi
     [[ "${p}" =~ ^[0-9]+$ ]] || die "端口必须是数字"
+    (( p >= 1 && p <= 65535 )) || die "端口超出范围 1-65535"
+    (( p < 1024 )) && warn "端口 ${p} < 1024,需要 root + CAP_NET_BIND_SERVICE 才能绑定"
     confirm "把面板端口改成 ${p} 并重启?" "y" || { info "已取消"; return; }
     "${INSTALL_DIR}/${CMD_NAME}" setting -port "${p}"
     systemctl restart "${SERVICE_NAME}"
@@ -289,17 +318,51 @@ cmd_magic() {
 cmd_backup() {
     require_installed
     local out="${1:-./${CMD_NAME}-backup-$(date +%Y%m%d-%H%M%S).tar.gz}"
+    warn "备份会包含 install-info.txt(若存在,含明文初始密码)与 sqlite 数据库"
+    warn "请妥善保管 ${out},不要上传到公开存储"
     tar -czf "${out}" -C "$(dirname "${DATA_DIR}")" "$(basename "${DATA_DIR}")"
-    ok "备份 → ${out} ($(du -h "${out}" | awk '{print $1}'))"
+    chmod 600 "${out}"
+    ok "备份 → ${out} ($(du -h "${out}" | awk '{print $1}')) [chmod 600]"
 }
 
 cmd_restore() {
     require_installed
     local in="$1"
     [[ -f "${in}" ]] || die "找不到备份文件:${in}"
+
+    # Inspect the tarball before extraction. We reject:
+    #   - absolute paths (would write to /etc/, /usr/, etc. directly)
+    #   - any entry containing ".." (zip-slip, escapes the data dir)
+    #   - symlinks / hardlinks (could redirect a later write outside)
+    # A malicious backup that survives this filter is restricted to
+    # writing files whose names start with the data dir basename.
+    local listing
+    listing=$(tar -tzf "${in}" 2>/dev/null) || die "tarball 无法读取"
+    while IFS= read -r entry; do
+        case "${entry}" in
+            /*|*../*|*/..|..|"") die "拒绝恢复:tarball 含可疑路径 '${entry}'" ;;
+        esac
+    done <<<"${listing}"
+    if tar -tvzf "${in}" 2>/dev/null | grep -qE '^(l|h)'; then
+        die "拒绝恢复:tarball 含符号链接 / 硬链接"
+    fi
+
     confirm "覆盖现有 ${DATA_DIR}?" "n" || { info "已取消"; return; }
     systemctl stop "${SERVICE_NAME}"
-    tar -xzf "${in}" -C "$(dirname "${DATA_DIR}")"
+    # Extract into a staging dir first so a partial / malicious tarball
+    # never half-overwrites the live data dir.
+    local stage
+    stage=$(mktemp -d -t "${CMD_NAME}-restore.XXXXXX") || die "mktemp 失败"
+    trap 'rm -rf "${stage}"' RETURN
+    if ! tar -xzf "${in}" -C "${stage}"; then
+        systemctl start "${SERVICE_NAME}" 2>/dev/null || true
+        die "解压失败"
+    fi
+    local restored="${stage}/$(basename "${DATA_DIR}")"
+    [[ -d "${restored}" ]] || die "tarball 缺少 $(basename "${DATA_DIR}")/ 顶层目录"
+    rm -rf "${DATA_DIR}"
+    mv "${restored}" "${DATA_DIR}"
+    chmod 700 "${DATA_DIR}"
     systemctl start "${SERVICE_NAME}"
     ok "已恢复"
 }

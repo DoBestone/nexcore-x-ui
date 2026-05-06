@@ -72,17 +72,30 @@ func runWebServer() {
 
 		switch sig {
 		case syscall.SIGHUP:
-			err := server.Stop()
-			if err != nil {
+			// Graceful reload: build the new server first, swap only on
+			// success. If Start() on the new instance fails (e.g. config
+			// poisoned by an aborted upgrade) we keep the old server
+			// running rather than exiting and leaving systemd to restart
+			// the process with a 502-window.
+			old := server
+			next := web.NewServer()
+			if err := old.Stop(); err != nil {
 				logger.Warning("stop server err:", err)
 			}
-			server = web.NewServer()
-			global.SetWebServer(server)
-			err = server.Start()
-			if err != nil {
-				log.Println(err)
-				return
+			if err := next.Start(); err != nil {
+				logger.Warning("reload failed, keeping previous server alive:", err)
+				// Best-effort: try to bring the previous instance back.
+				revived := web.NewServer()
+				if e := revived.Start(); e != nil {
+					log.Println("revive previous server failed:", e)
+					return
+				}
+				server = revived
+				global.SetWebServer(server)
+				continue
 			}
+			server = next
+			global.SetWebServer(server)
 		default:
 			server.Stop()
 			return

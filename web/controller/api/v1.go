@@ -389,12 +389,13 @@ func (a *V1Controller) createToken(c *gin.Context) {
 		BadRequest(c, "create_failed", err.Error())
 		return
 	}
-	// Plaintext token returned exactly once.
+	// The plaintext is surfaced exactly once here; the DB only stores
+	// its SHA256, so there is no recovery path if the operator loses it.
 	Created(c, gin.H{
-		"id":        t.Id,
-		"name":      t.Name,
-		"token":     t.Token,
-		"createdAt": t.CreatedAt,
+		"id":        t.Row.Id,
+		"name":      t.Row.Name,
+		"token":     t.Plaintext,
+		"createdAt": t.Row.CreatedAt,
 	})
 }
 
@@ -454,6 +455,11 @@ func (a *V1Controller) deleteToken(c *gin.Context) {
 
 // ---------- enable toggle + bulk inbounds ----------
 
+// maxBulkIDs caps how many inbounds a single bulk call may touch.
+// Anything larger is almost certainly a misuse / DoS, and unbounded ids
+// arrays can blow up memory and SQLite's IN-list compilation.
+const maxBulkIDs = 1000
+
 type bulkIDReq struct {
 	IDs    []int `json:"ids" binding:"required"`
 	Enable bool  `json:"enable"`
@@ -491,6 +497,10 @@ func (a *V1Controller) bulkCreateInbounds(c *gin.Context) {
 		BadRequest(c, "invalid_body", err.Error())
 		return
 	}
+	if len(items) > maxBulkIDs {
+		BadRequest(c, "too_many_items", "bulk size exceeds limit (max 1000)")
+		return
+	}
 	user, _ := a.userService.GetFirstUser()
 	if user != nil {
 		for _, in := range items {
@@ -511,6 +521,10 @@ func (a *V1Controller) bulkSetEnable(c *gin.Context) {
 		BadRequest(c, "invalid_body", err.Error())
 		return
 	}
+	if len(req.IDs) > maxBulkIDs {
+		BadRequest(c, "too_many_items", "bulk size exceeds limit (max 1000)")
+		return
+	}
 	n, err := a.inboundService.SetEnableMany(req.IDs, req.Enable)
 	if err != nil {
 		Internal(c, "update_failed", err)
@@ -528,6 +542,10 @@ func (a *V1Controller) bulkDelete(c *gin.Context) {
 		BadRequest(c, "invalid_body", err.Error())
 		return
 	}
+	if len(req.IDs) > maxBulkIDs {
+		BadRequest(c, "too_many_items", "bulk size exceeds limit (max 1000)")
+		return
+	}
 	n, err := a.inboundService.DeleteMany(req.IDs)
 	if err != nil {
 		Internal(c, "delete_failed", err)
@@ -537,11 +555,24 @@ func (a *V1Controller) bulkDelete(c *gin.Context) {
 	OK(c, gin.H{"affected": n})
 }
 
+// bulkResetTraffic resets up/down counters. To avoid an accidental "wipe
+// every node's traffic" via empty body, the all-rows path requires an
+// explicit {"all": true} flag. {"ids": [...]} stays untouched.
 func (a *V1Controller) bulkResetTraffic(c *gin.Context) {
 	var req struct {
 		IDs []int `json:"ids"`
+		All bool  `json:"all"`
 	}
 	_ = c.ShouldBindJSON(&req)
+	if len(req.IDs) > maxBulkIDs {
+		BadRequest(c, "too_many_items", "bulk size exceeds limit (max 1000)")
+		return
+	}
+	if len(req.IDs) == 0 && !req.All {
+		BadRequest(c, "confirmation_required",
+			`pass {"ids": [...]} to scope or {"all": true} to reset every inbound`)
+		return
+	}
 	n, err := a.inboundService.ResetTrafficMany(req.IDs)
 	if err != nil {
 		Internal(c, "reset_failed", err)

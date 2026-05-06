@@ -20,6 +20,11 @@ const (
 
 var (
 	ErrMagicTokenInvalid = errors.New("magic token invalid or already used")
+	// ErrMagicTokenExpired is preserved for internal callers that want
+	// to log "expired" specifically (e.g. audit). External callers and
+	// HTTP responses must surface the generic "invalid" error so an
+	// attacker can't distinguish "this token existed once" from "this
+	// token never existed" via the response.
 	ErrMagicTokenExpired = errors.New("magic token expired")
 )
 

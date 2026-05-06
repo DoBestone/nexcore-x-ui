@@ -109,9 +109,22 @@ jobs:
       - name: list artifacts
         run: ls -la dist/
 
+      # Produce checksums.txt covering every tarball. Both the panel's
+      # self-update path (web/service/update.go) and update.sh fetch this
+      # alongside the tarball and abort if SHA256 doesn't match — without
+      # it an attacker who can swap a release asset would get RCE on every
+      # node that runs `nexcore-x-ui update`.
+      - name: generate checksums
+        working-directory: dist
+        run: |
+          sha256sum *.tar.gz > checksums.txt
+          cat checksums.txt
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           generate_release_notes: true
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt

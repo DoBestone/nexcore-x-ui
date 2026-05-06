@@ -94,13 +94,45 @@ download_release() {
     # / log output therefore MUST go to stderr (>&2), or the caller's variable
     # will end up containing the log string concatenated with the path.
     local version="$1"
-    local url="https://github.com/${GH_OWNER}/${GH_REPO}/releases/download/${version}/nexcore-x-ui-linux-${ARCH}.tar.gz"
+    local pkg="nexcore-x-ui-linux-${ARCH}.tar.gz"
+    local url="https://github.com/${GH_OWNER}/${GH_REPO}/releases/download/${version}/${pkg}"
+    local sum_url="https://github.com/${GH_OWNER}/${GH_REPO}/releases/download/${version}/checksums.txt"
     local dest="/tmp/nexcore-x-ui-${version}-${ARCH}.tar.gz"
+    local sum_dest="/tmp/nexcore-x-ui-${version}-checksums.txt"
     echo -e "${green}下载:${plain} ${url}" >&2
     if ! curl -fSL --connect-timeout 10 -o "${dest}" "${url}" >&2; then
         echo -e "${red}下载失败,请检查 release 是否存在${plain}" >&2
         exit 1
     fi
+    # Verify SHA256 against checksums.txt published in the same release.
+    # An attacker who can swap a release asset gets RCE on every node that
+    # runs install.sh — checksums.txt closes that window. Failure is fatal.
+    echo -e "${green}校验 SHA256…${plain}" >&2
+    if ! curl -fSL --connect-timeout 10 -o "${sum_dest}" "${sum_url}" >&2; then
+        echo -e "${red}下载 checksums.txt 失败 — release ${version} 缺少校验文件,拒绝继续${plain}" >&2
+        rm -f "${dest}"
+        exit 1
+    fi
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        echo -e "${red}本机缺少 sha256sum,无法校验,拒绝继续${plain}" >&2
+        rm -f "${dest}" "${sum_dest}"
+        exit 1
+    fi
+    local expected actual
+    expected=$(awk -v want="${pkg}" '$2 == want || $2 == "*"want {print $1; exit}' "${sum_dest}")
+    if [[ -z "${expected}" ]]; then
+        echo -e "${red}checksums.txt 中找不到 ${pkg} 的条目${plain}" >&2
+        rm -f "${dest}" "${sum_dest}"
+        exit 1
+    fi
+    actual=$(sha256sum "${dest}" | awk '{print $1}')
+    if [[ "${expected}" != "${actual}" ]]; then
+        echo -e "${red}SHA256 不匹配!  expected=${expected}  actual=${actual}${plain}" >&2
+        rm -f "${dest}" "${sum_dest}"
+        exit 1
+    fi
+    rm -f "${sum_dest}"
+    echo -e "${green}  SHA256 OK: ${actual}${plain}" >&2
     echo "${dest}"
 }
 
@@ -133,10 +165,22 @@ install_panel() {
     install -m 0755 "${INSTALL_DIR}/${CMD_NAME}.sh" "/usr/bin/${CMD_NAME}"
     install -m 0644 "${INSTALL_DIR}/${CMD_NAME}.service" "${SERVICE_FILE}"
 
-    # Pin DB path so install-info.txt lands in DATA_DIR for us to grep.
-    sed -i.bak '/^Environment=NEXCORE_DB_PATH=/d' "${SERVICE_FILE}"
-    sed -i 's|^\[Service\]|[Service]\nEnvironment=NEXCORE_DB_PATH='"${DATA_DIR}/${CMD_NAME}.db"'|' "${SERVICE_FILE}"
-    rm -f "${SERVICE_FILE}.bak"
+    # Pin DB path via a systemd drop-in. Editing the unit file in place
+    # with `sed -i ... \n[Service]\nEnvironment=...` is fragile: any
+    # special character in DATA_DIR (|, /, &) breaks the s-command, and
+    # operators that customize the unit on next upgrade lose their edits.
+    # Drop-ins compose cleanly with future unit-file changes and survive
+    # `install-mode 0644` rewrites of the parent unit.
+    local override_dir="/etc/systemd/system/${CMD_NAME}.service.d"
+    mkdir -p "${override_dir}"
+    chmod 755 "${override_dir}"
+    cat > "${override_dir}/10-data-dir.conf" <<EOF
+# Managed by install.sh — pins NEXCORE_DB_PATH so install-info.txt lands in
+# the DATA_DIR install.sh chose. Hand-edit at your own risk.
+[Service]
+Environment=NEXCORE_DB_PATH=${DATA_DIR}/${CMD_NAME}.db
+EOF
+    chmod 644 "${override_dir}/10-data-dir.conf"
 
     systemctl daemon-reload
     systemctl enable "${CMD_NAME}"

@@ -1,6 +1,9 @@
 package database
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+
 	"github.com/go-gormigrate/gormigrate/v2"
 	"gorm.io/gorm"
 
@@ -69,6 +72,55 @@ func runMigrations(db *gorm.DB) error {
 				return tx.Migrator().DropTable(&model.APILog{})
 			},
 		},
+		{
+			// Hash existing API tokens at rest. The Token column now
+			// stores hex(SHA256(plaintext)) instead of the plaintext;
+			// the auth middleware hashes the incoming value before
+			// looking it up. Operators keep using the plaintext they
+			// already have — only the DB representation changed.
+			//
+			// Detection of "already hashed" relies on the new column
+			// width (64 hex chars). The legacy random.Seq(48) tokens
+			// are 48 chars, so they're easy to distinguish.
+			ID: "0006_hash_api_tokens",
+			Migrate: func(tx *gorm.DB) error {
+				var rows []model.APIToken
+				if err := tx.Find(&rows).Error; err != nil {
+					return err
+				}
+				for _, r := range rows {
+					if len(r.Token) == 64 && isHex(r.Token) {
+						continue // already hashed
+					}
+					sum := sha256.Sum256([]byte(r.Token))
+					if err := tx.Model(&model.APIToken{}).
+						Where("id = ?", r.Id).
+						Update("token", hex.EncodeToString(sum[:])).Error; err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				// Hashing is one-way; rollback would invalidate every
+				// token. Operators that need to revert should rotate
+				// tokens after downgrading.
+				return nil
+			},
+		},
 	})
 	return m.Migrate()
+}
+
+func isHex(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }

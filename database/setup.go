@@ -3,7 +3,6 @@ package database
 import (
 	"errors"
 	"fmt"
-	"math/rand"
 	"os"
 	"path"
 	"time"
@@ -73,8 +72,7 @@ func RunFirstRunSetup(dbPath string) (*FirstRunInfo, error) {
 	if portMissing {
 		// Avoid privileged ports and a few common ones that conflict with
 		// services the panel host is likely also running.
-		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-		info.Port = randomFreePortCandidate(rng)
+		info.Port = randomFreePortCandidate()
 		if err := db.Create(&model.Setting{
 			Key:   "webPort",
 			Value: fmt.Sprintf("%d", info.Port),
@@ -91,7 +89,7 @@ func RunFirstRunSetup(dbPath string) (*FirstRunInfo, error) {
 	return info, nil
 }
 
-func randomFreePortCandidate(rng *rand.Rand) int {
+func randomFreePortCandidate() int {
 	// Range chosen to skip ephemeral ranges and most well-known apps.
 	const lo, hi = 20000, 59999
 	skip := map[int]bool{
@@ -100,7 +98,7 @@ func randomFreePortCandidate(rng *rand.Rand) int {
 		54321: true, // legacy x-ui default
 	}
 	for i := 0; i < 30; i++ {
-		p := lo + rng.Intn(hi-lo+1)
+		p := lo + random.IntN(hi-lo+1)
 		if !skip[p] {
 			return p
 		}
