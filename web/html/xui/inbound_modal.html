@@ -20,6 +20,17 @@
         // 完整专用表单留 v1.0.7+。后端 dry-run 兜底,写错直接拒绝不会害到面板。
         useRawStream: false,
         rawStreamSettings: '',
+        // REALITY 表单输入器状态(v1.0.8)。和 useRawStream 联动:
+        // applyRealityForm() 把这些字段拼成完整 reality streamSettings JSON,
+        // 写到 rawStreamSettings + 设 useRawStream=true。下次打开 modal 重置。
+        realityForm: {
+            dest: 'www.cloudflare.com:443',
+            serverNames: 'www.cloudflare.com',
+            privateKey: '',
+            publicKey: '',
+            shortIds: '',
+            fingerprint: 'chrome',
+        },
         ok() {
             ObjectUtil.execute(inModal.confirm, inModal.inbound, inModal.dbInbound);
         },
@@ -42,6 +53,14 @@
             // on if they need to keep editing the JSON).
             this.useRawStream = false;
             this.rawStreamSettings = '';
+            this.realityForm = {
+                dest: 'www.cloudflare.com:443',
+                serverNames: 'www.cloudflare.com',
+                privateKey: '',
+                publicKey: '',
+                shortIds: '',
+                fingerprint: 'chrome',
+            };
             this.confirm = confirm;
             this.visible = true;
         },
@@ -149,6 +168,51 @@
                     }
                 }
                 this.inModal.rawStreamSettings = JSON.stringify(snippet, null, 2);
+            },
+
+            // applyRealityForm 把表单字段拼成完整 reality streamSettings JSON,
+            // 写到 rawStreamSettings 并启用原文模式 — 等价于"用户填表 → 生成
+            // JSON → 直接用原文模式提交"。privateKey/publicKey 留空时也允许
+            // 应用,后端 dry-run 会以 xray 自己的错误信息精确告诉用户哪个字段
+            // 还需要补,而不是 UI 这层硬性拦截(避免妨碍调试用法)。
+            applyRealityForm() {
+                const split = (s) => (s || '')
+                    .split(',')
+                    .map(x => x.trim())
+                    .filter((x, i, arr) => x !== '' || i === arr.length - 1 ||
+                            (arr.length === 1));  // 保留唯一空字符串(允许任意 sid)
+                // shortIds 允许空字符串作为元素(reality 协议:空 sid 匹配任意)
+                const shortIds = (this.inModal.realityForm.shortIds || '')
+                    .split(',').map(x => x.trim());
+                const snippet = {
+                    network: 'tcp',
+                    security: 'reality',
+                    realitySettings: {
+                        show: false,
+                        dest: this.inModal.realityForm.dest || 'www.cloudflare.com:443',
+                        xver: 0,
+                        serverNames: split(this.inModal.realityForm.serverNames)
+                            .filter(x => x !== ''),
+                        privateKey: this.inModal.realityForm.privateKey || '',
+                        publicKey: this.inModal.realityForm.publicKey || '',
+                        shortIds: shortIds.length ? shortIds : [''],
+                        fingerprint: this.inModal.realityForm.fingerprint || 'chrome',
+                    },
+                };
+                this.inModal.rawStreamSettings = JSON.stringify(snippet, null, 2);
+                this.inModal.useRawStream = true;
+                this.$message.success('已生成 reality 配置到原文模式,保存即可生效');
+            },
+
+            resetRealityForm() {
+                this.inModal.realityForm = {
+                    dest: 'www.cloudflare.com:443',
+                    serverNames: 'www.cloudflare.com',
+                    privateKey: '',
+                    publicKey: '',
+                    shortIds: '',
+                    fingerprint: 'chrome',
+                };
             },
         },
         watch: {

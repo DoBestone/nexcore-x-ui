@@ -111,7 +111,71 @@
      原文,任意 xray 支持的字段都能立刻用上。开启后会覆盖 form 拼出来的
      streamSettings;后端的 dry-run 校验会兜底,写错也不会让其他入站挂掉。 -->
 <a-collapse style="margin-top: 12px;">
-    <a-collapse-panel header="高级:streamSettings 原文 JSON(REALITY / XHTTP / uTLS 等)">
+    <!-- 1. REALITY 表单输入器(v1.0.8 新加)
+         不必手撸 JSON。用户在 vue 表单里填字段,点"应用",reality 配置就被
+         拼成完整 streamSettings JSON 写到下面的 textarea 并自动启用原文模式。
+         保存时后端 dry-run 兜底。-->
+    <a-collapse-panel header="REALITY 表单(VLESS + Vision 反审查标配)">
+        <a-alert type="info" show-icon style="margin-bottom: 12px;">
+            <span slot="message">
+                填写下面字段后点 <strong>应用</strong>,会把 reality 配置生成到原文
+                streamSettings 并启用原文模式。<code>xray x25519</code> 在节点上跑
+                一次拿到 Private/Public key 对,粘贴进来即可。
+            </span>
+        </a-alert>
+        <a-form :label-col="{ span: 5 }" :wrapper-col="{ span: 18 }">
+            <a-form-item label="伪装目标 (dest)">
+                <a-input v-model.trim="inModal.realityForm.dest"
+                         placeholder="www.cloudflare.com:443"></a-input>
+            </a-form-item>
+            <a-form-item>
+                <span slot="label">SNI 列表 (serverNames)</span>
+                <a-input v-model.trim="inModal.realityForm.serverNames"
+                         placeholder="www.cloudflare.com,cdn.cloudflare.com (逗号分隔)"></a-input>
+            </a-form-item>
+            <a-form-item label="Private Key">
+                <a-input v-model.trim="inModal.realityForm.privateKey"
+                         placeholder="xray x25519 输出的 Private key"
+                         class="mono"></a-input>
+            </a-form-item>
+            <a-form-item label="Public Key">
+                <a-input v-model.trim="inModal.realityForm.publicKey"
+                         placeholder="xray x25519 输出的 Public key (分享链接需要)"
+                         class="mono"></a-input>
+            </a-form-item>
+            <a-form-item>
+                <span slot="label">Short IDs</span>
+                <a-input v-model.trim="inModal.realityForm.shortIds"
+                         placeholder="0123abcd,ee (逗号分隔,空字符串允许任意 sid)"></a-input>
+            </a-form-item>
+            <a-form-item label="uTLS Fingerprint">
+                <a-select v-model="inModal.realityForm.fingerprint" style="width: 200px;">
+                    <a-select-option value="chrome">chrome (推荐)</a-select-option>
+                    <a-select-option value="firefox">firefox</a-select-option>
+                    <a-select-option value="safari">safari</a-select-option>
+                    <a-select-option value="edge">edge</a-select-option>
+                    <a-select-option value="ios">ios</a-select-option>
+                    <a-select-option value="android">android</a-select-option>
+                    <a-select-option value="random">random</a-select-option>
+                    <a-select-option value="randomized">randomized</a-select-option>
+                </a-select>
+            </a-form-item>
+            <a-form-item :wrapper-col="{ offset: 5, span: 18 }">
+                <a-button type="primary" @click="applyRealityForm">
+                    应用到 streamSettings
+                </a-button>
+                <a-button style="margin-left: 8px;" @click="resetRealityForm">
+                    重置
+                </a-button>
+                <span style="color: #94a3b8; font-size: 12px; margin-left: 12px;">
+                    注:protocol 必须先选 vless,vless 的 flow 选 xtls-rprx-vision
+                </span>
+            </a-form-item>
+        </a-form>
+    </a-collapse-panel>
+
+    <!-- 2. 高级原文模式(v1.0.6 引入,reality 表单背后实际写的就是这一段) -->
+    <a-collapse-panel header="高级:streamSettings 原文 JSON(任意 xray 字段)">
         <a-alert type="info" show-icon style="margin-bottom: 10px;">
             <span slot="message">
                 启用此处 textarea 后,保存入站时会直接以这段 JSON 作为
