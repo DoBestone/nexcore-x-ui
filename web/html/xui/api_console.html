@@ -570,7 +570,7 @@ const app = new Vue({
             { title: 'IP',     dataIndex: 'ip',                           width: 130 },
         ],
 
-        // API 文档:metadata 来自 {{template "apiDocsData"}} 注入的全局 apiDocs
+        // API 文档:metadata 来自 component/api_docs_data.html 注入的全局 apiDocs
         apiDocs: (typeof apiDocs !== 'undefined') ? apiDocs : { groups: [] },
         apiQuery: '',
     },

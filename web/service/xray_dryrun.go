@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -91,34 +92,49 @@ func (s *XrayService) BuildCandidateConfig(inbounds []*model.Inbound) (*xray.Con
 	return xrayConfig, nil
 }
 
-// DryRun marshals the candidate config and runs `xray test -c -` with it on
-// stdin. Returns nil on success; ErrXrayConfigInvalid wrapped with xray's
-// own stderr on failure.
+// DryRun marshals the candidate config to a temp file and asks xray to
+// validate it. Uses the legacy `-test -config <file>` flag form because
+// it works on every xray-core release we've ever shipped (>=v1.0); the
+// modern `test` subcommand is only on v1.5+ and panels upgraded from
+// vaxilu/x-ui sometimes still carry an old xray binary, which would
+// fail with "unknown command" — exactly what hit v1.0.8 production.
+//
+// Returns nil on success; ErrXrayConfigInvalid wrapped with xray's own
+// stderr on failure (the diagnostic is field-precise — e.g. "infra/conf:
+// failed to parse private key — invalid base64 length").
 func (s *XrayService) DryRun(cfg *xray.Config) error {
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal candidate config: %w", err)
 	}
 
+	// Write to a temp file: xray's stdin support varies across versions.
+	// File-based -config is universal.
+	tmp, err := os.CreateTemp("", "nexcore-xray-test-*.json")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	tmp.Close()
+
 	ctx, cancel := context.WithTimeout(context.Background(), dryRunTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, xray.GetBinaryPath(), "test", "-c", "stdin:")
-	cmd.Stdin = bytes.NewReader(data)
+	cmd := exec.CommandContext(ctx, xray.GetBinaryPath(), "-test", "-config", tmpPath)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	cmd.Stdout = &stderr // xray test prints to either; capture both
+	cmd.Stdout = &stderr
 
 	if err := cmd.Run(); err != nil {
-		// Surface xray's own diagnostic — it's specific (e.g. "infra/conf:
-		// failed to parse private key — invalid base64 length") which the
-		// API caller / panel user needs to fix the field.
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
 		}
-		// xray test exits with status 23 for invalid config, 0 for ok;
-		// don't bother distinguishing here — non-zero == reject.
 		return fmt.Errorf("%w: %s", ErrXrayConfigInvalid, msg)
 	}
 	return nil

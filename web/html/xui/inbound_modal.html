@@ -31,6 +31,17 @@
             shortIds: '',
             fingerprint: 'chrome',
         },
+        // HTTPUpgrade / XHTTP 表单状态(v1.0.9)。
+        // 同 reality:apply 方法把字段拼成 streamSettings JSON 写到原文模式
+        // textarea + 启用 useRawStream。后端 dry-run 兜底。
+        huForm: {
+            host: '', path: '/', tls: true,
+            tlsServer: '', certFile: '', keyFile: '',
+        },
+        xhForm: {
+            host: '', path: '/', mode: 'auto', tls: true,
+            tlsServer: '', certFile: '', keyFile: '',
+        },
         ok() {
             ObjectUtil.execute(inModal.confirm, inModal.inbound, inModal.dbInbound);
         },
@@ -60,6 +71,14 @@
                 publicKey: '',
                 shortIds: '',
                 fingerprint: 'chrome',
+            };
+            this.huForm = {
+                host: '', path: '/', tls: true,
+                tlsServer: '', certFile: '', keyFile: '',
+            };
+            this.xhForm = {
+                host: '', path: '/', mode: 'auto', tls: true,
+                tlsServer: '', certFile: '', keyFile: '',
             };
             this.confirm = confirm;
             this.visible = true;
@@ -212,6 +231,69 @@
                     publicKey: '',
                     shortIds: '',
                     fingerprint: 'chrome',
+                };
+            },
+
+            // buildTLSBlock — 共享 helper:HTTPUpgrade / XHTTP 都需要的 TLS
+            // 子对象。空字段不写出去,xray test 拿到无效证书路径时会报错
+            // 提示用户补,跟 reality form 同套思路。
+            buildTLSBlock(form) {
+                const certs = [];
+                if (form.certFile || form.keyFile) {
+                    certs.push({
+                        certificateFile: form.certFile,
+                        keyFile: form.keyFile,
+                    });
+                }
+                const tls = {};
+                if (form.tlsServer) tls.serverName = form.tlsServer;
+                if (certs.length) tls.certificates = certs;
+                tls.alpn = ['h2', 'http/1.1'];
+                return tls;
+            },
+
+            applyHTTPUpgradeForm() {
+                const f = this.inModal.huForm;
+                const snippet = {
+                    network: 'httpupgrade',
+                    security: f.tls ? 'tls' : 'none',
+                    httpupgradeSettings: {
+                        host: f.host || '',
+                        path: f.path || '/',
+                    },
+                };
+                if (f.tls) snippet.tlsSettings = this.buildTLSBlock(f);
+                this.inModal.rawStreamSettings = JSON.stringify(snippet, null, 2);
+                this.inModal.useRawStream = true;
+                this.$message.success('已生成 HTTPUpgrade 配置到原文模式');
+            },
+            resetHTTPUpgradeForm() {
+                this.inModal.huForm = {
+                    host: '', path: '/', tls: true,
+                    tlsServer: '', certFile: '', keyFile: '',
+                };
+            },
+
+            applyXHTTPForm() {
+                const f = this.inModal.xhForm;
+                const snippet = {
+                    network: 'xhttp',
+                    security: f.tls ? 'tls' : 'none',
+                    xhttpSettings: {
+                        host: f.host || '',
+                        path: f.path || '/',
+                        mode: f.mode || 'auto',
+                    },
+                };
+                if (f.tls) snippet.tlsSettings = this.buildTLSBlock(f);
+                this.inModal.rawStreamSettings = JSON.stringify(snippet, null, 2);
+                this.inModal.useRawStream = true;
+                this.$message.success('已生成 XHTTP 配置到原文模式');
+            },
+            resetXHTTPForm() {
+                this.inModal.xhForm = {
+                    host: '', path: '/', mode: 'auto', tls: true,
+                    tlsServer: '', certFile: '', keyFile: '',
                 };
             },
         },
