@@ -110,6 +110,31 @@
 - 版本号在 `config/` + `nexcore-x-ui.sh` + 仪表盘版本卡多处出现,**统一更新**(参考 commit `eb97138` / `a164dc6`)
 - CI 用 `setup-go@1.26` 对齐 `go.mod`(踩过坑,见 `a164dc6`)
 - Release asset 命名规则不要乱改,在线升级会按命名匹配
+- **release tarball 解压后必须 chown root:root**——CI runner 是 uid 1001,
+  `cp -a` / `tar` 保留这个 uid,但 `xray.preflightBinary` 要求 owner=root,
+  否则 xray 永不启动循环报 "owned by uid 1001"。三条升级路径
+  (`update.sh` / `nexcore-x-ui.sh::cmd_update` / `service/update.go::ApplyLatest`)
+  全都要 chown,任一漏掉就重现 v1.0.5 故障(commit `e604675`)
+
+### HTTP / Middleware 相关 — **非常容易踩,先看这条**
+
+任何**包装 `gin.ResponseWriter` 的 middleware**(gzip、metrics、内容改写等):
+
+- **必须在 `c.Next()` 返回后 flush 任何缓冲**。Gin **不会**自动调
+  `Flush()` —— 只有 SSE/streaming 路径才调。普通 handler 写完就返回,
+  buffer 里的数据**永远没机会出去**
+- **不要**只调 `gz.Close()` / `encoder.Close()` 就走人,要确保 wrapper
+  的内部缓冲也 flush 到底层 `ResponseWriter`
+- **任何"小响应跳过压缩 / 跳过加密 / 跳过改写"的优化分支** —— 要在分支上明确把
+  原始 bytes 写到 socket,不能 silently 吞掉
+- 写 wrapper 必带 6 条最小回归测试(参考 `web/gzip_middleware_test.go`):
+  · 小响应 (<1KB)、大响应 (≥1KB)、客户端不要该编码、已编码内容旁路、
+  204 空响应不崩、handler 多次 Write 字节累加完整
+
+**踩坑历史**:`v1.0.4` 引入 gzipMiddleware 时只测了大响应,小响应 buffered
+没 flush 被吞掉,导致 v1.0.5/v1.0.6 用户 ERR_CONTENT_LENGTH_MISMATCH 一片
+(commit `16c3f42`)。任何 ResponseWriter 包装都要照着这条 checklist 写测试,
+**不要相信"看起来对就行"**。
 
 ---
 
