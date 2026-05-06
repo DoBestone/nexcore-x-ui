@@ -45,14 +45,11 @@ type UpdateCheck struct {
 	Release        *ReleaseInfo `json:"release"`
 }
 
-// CheckLatest queries GitHub releases. owner/repo come from env NEXCORE_GH_OWNER /
-// NEXCORE_GH_REPO so the binary remains repo-agnostic; install.sh sets these
-// when it knows the source repo, but operators can override too.
+// CheckLatest queries GitHub releases for the latest tag and compares it to
+// the running binary version. owner/repo default to the upstream repo; see
+// repoCoordinates for env-var overrides.
 func (s *UpdateService) CheckLatest() (*UpdateCheck, error) {
 	owner, repo := repoCoordinates()
-	if owner == "" || repo == "" {
-		return nil, errors.New("repository coordinates not configured (set NEXCORE_GH_OWNER, NEXCORE_GH_REPO)")
-	}
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 	r, err := s.fetchRelease(url)
 	if err != nil {
@@ -82,9 +79,6 @@ func (s *UpdateService) CheckLatest() (*UpdateCheck, error) {
 // with no binary at all.
 func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) {
 	owner, repo := repoCoordinates()
-	if owner == "" || repo == "" {
-		return nil, errors.New("repository coordinates not configured")
-	}
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 	if targetVersion != "" {
 		url = fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, targetVersion)
@@ -214,9 +208,19 @@ func (s *UpdateService) pickAsset(r *ReleaseInfo) string {
 	return ""
 }
 
+// repoCoordinates returns the GitHub owner/repo used for self-update. The
+// defaults point at the canonical NexCore x-ui repository; operators running
+// a fork override via NEXCORE_GH_OWNER / NEXCORE_GH_REPO env vars on the
+// systemd unit.
 func repoCoordinates() (owner, repo string) {
 	owner = os.Getenv("NEXCORE_GH_OWNER")
+	if owner == "" {
+		owner = "DoBestone"
+	}
 	repo = os.Getenv("NEXCORE_GH_REPO")
+	if repo == "" {
+		repo = "nexcore-x-ui"
+	}
 	return
 }
 

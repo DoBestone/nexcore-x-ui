@@ -23,6 +23,7 @@ var docsFS embed.FS
 type APIPanelController struct {
 	tokenService  service.APITokenService
 	apiLogService service.APILogService
+	updateService service.UpdateService
 }
 
 func NewAPIPanelController(g *gin.RouterGroup) *APIPanelController {
@@ -42,6 +43,9 @@ func (a *APIPanelController) initRouter(g *gin.RouterGroup) {
 	g.DELETE("/logs", a.purgeLogs)
 
 	g.GET("/docs", a.docs)
+
+	g.GET("/update/check", a.updateCheck)
+	g.POST("/update/apply", a.updateApply)
 }
 
 // ---------- tokens ----------
@@ -123,6 +127,30 @@ func (a *APIPanelController) purgeLogs(c *gin.Context) {
 		return
 	}
 	jsonObj(c, gin.H{"deleted": n}, nil)
+}
+
+// ---------- self-update ----------
+
+func (a *APIPanelController) updateCheck(c *gin.Context) {
+	out, err := a.updateService.CheckLatest()
+	if err != nil {
+		jsonObj(c, nil, err)
+		return
+	}
+	jsonObj(c, out, nil)
+}
+
+func (a *APIPanelController) updateApply(c *gin.Context) {
+	var body struct {
+		Version string `json:"version"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	out, err := a.updateService.ApplyLatest(body.Version)
+	if err != nil {
+		jsonObj(c, nil, err)
+		return
+	}
+	jsonObj(c, out, nil)
 }
 
 // ---------- docs ----------

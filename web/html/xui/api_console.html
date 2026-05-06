@@ -141,6 +141,53 @@
                         </div>
                     </a-tab-pane>
 
+                    <!-- ============ 面板在线更新 ============ -->
+                    <a-tab-pane key="update" tab="面板更新">
+                        <div class="api-tab-body">
+                            <a-descriptions :column="1" size="small" bordered style="margin-bottom: 16px">
+                                <a-descriptions-item label="当前版本">
+                                    <span class="mono">[[ updateInfo.current || '?' ]]</span>
+                                </a-descriptions-item>
+                                <a-descriptions-item label="最新版本">
+                                    <span class="mono">[[ updateInfo.latest || '(尚未检查)' ]]</span>
+                                    <a-tag v-if="updateInfo.updateAvailable" color="orange" style="margin-left: 8px">
+                                        有新版本
+                                    </a-tag>
+                                    <a-tag v-else-if="updateInfo.latest" color="green" style="margin-left: 8px">
+                                        已是最新
+                                    </a-tag>
+                                </a-descriptions-item>
+                                <a-descriptions-item v-if="updateInfo.release" label="发布说明">
+                                    <pre style="white-space: pre-wrap; max-height: 200px; overflow: auto; margin: 0; font-size: 12px;">[[ updateInfo.release.body || '(无说明)' ]]</pre>
+                                </a-descriptions-item>
+                            </a-descriptions>
+
+                            <a-space>
+                                <a-button :loading="updating.checking" icon="reload" @click="checkUpdate">
+                                    检查更新
+                                </a-button>
+                                <a-popconfirm title="确认在线升级到最新版本?升级时面板会重启,需重新登录"
+                                              ok-text="开始升级" cancel-text="取消"
+                                              @confirm="applyUpdate"
+                                              :disabled="!updateInfo.updateAvailable">
+                                    <a-button type="primary" :loading="updating.applying"
+                                              :disabled="!updateInfo.updateAvailable" icon="cloud-download">
+                                        在线升级到 [[ updateInfo.latest || '?' ]]
+                                    </a-button>
+                                </a-popconfirm>
+                                <a-button type="link" :href="'https://github.com/DoBestone/nexcore-x-ui/releases'" target="_blank">
+                                    查看 GitHub Releases
+                                </a-button>
+                            </a-space>
+
+                            <p style="color: #94a3b8; font-size: 12px; margin-top: 14px;">
+                                · 升级流程:从 GitHub Release 拉取 tarball → 校验 → 原子替换二进制 → SIGHUP 重启面板<br>
+                                · 失败会自动回滚到 .old 备份<br>
+                                · 默认源为 <span class="mono">DoBestone/nexcore-x-ui</span>,可通过环境变量 NEXCORE_GH_OWNER/NEXCORE_GH_REPO 指向你的镜像仓库
+                            </p>
+                        </div>
+                    </a-tab-pane>
+
                     <!-- ============ API 文档 ============ -->
                     <a-tab-pane key="docs" tab="API 文档">
                         <div class="api-tab-body">
@@ -161,15 +208,13 @@
 </a-layout>
 {{template "js" .}}
 <script>
-const basePath = '{{ .base_path }}';
-
 const app = new Vue({
     delimiters: ['[[', ']]'],
     el: '#app',
     data: {
         siderDrawer,
         spinning: false,
-        basePath,
+        basePath: basePath,
 
         tokens: [],
         newToken: { name: '', loading: false },
@@ -198,6 +243,9 @@ const app = new Vue({
         ],
 
         docsText: '',
+
+        updateInfo: { current: '', latest: '', updateAvailable: false, release: null },
+        updating: { checking: false, applying: false },
     },
     methods: {
         formatTime(unix) {
@@ -295,6 +343,28 @@ const app = new Vue({
             navigator.clipboard?.writeText(this.docsText)
                 .then(() => this.$message.success('已复制全文'))
                 .catch(() => this.$message.warning('请手动选择复制'));
+        },
+
+        // ---------- self update ----------
+        async checkUpdate() {
+            this.updating.checking = true;
+            const msg = await HttpUtil.get('/xui/api/update/check');
+            this.updating.checking = false;
+            if (msg.success && msg.obj) {
+                this.updateInfo = msg.obj;
+            }
+        },
+        async applyUpdate() {
+            this.updating.applying = true;
+            const msg = await HttpUtil.post('/xui/api/update/apply', {});
+            // 不要在 finally 里 set false:升级成功的话面板马上 SIGHUP 重启,
+            // 等 UI 可见已经是新版了。失败才会真正继续渲染。
+            if (msg.success) {
+                this.$message.success('升级已发起,面板将在数秒内重启');
+                setTimeout(() => location.reload(), 8000);
+            } else {
+                this.updating.applying = false;
+            }
         },
     },
     async mounted() {
