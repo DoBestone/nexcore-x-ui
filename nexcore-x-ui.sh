@@ -368,9 +368,29 @@ cmd_restore() {
 }
 
 cmd_db() {
+    # Open the panel sqlite shell. Default is read-only — interactive
+    # exploration is what 99% of operators want, and a misplaced
+    # `DELETE FROM users` from a tutorial copy/paste shouldn't be able
+    # to nuke auth. Pass `-rw` (or `--write`) to opt into write mode;
+    # we still warn loudly so muscle memory doesn't carry over.
     require_installed
     command -v sqlite3 >/dev/null 2>&1 || die "需要先安装 sqlite3 (apt install sqlite3)"
-    sqlite3 "${DB_FILE}"
+    local mode="ro"
+    case "${1:-}" in
+        -rw|--write|rw|write) mode="rw" ;;
+        ""|-r|-ro|--read|ro|read) mode="ro" ;;
+        *) die "用法: ${CMD_NAME} db [ro|rw]   (默认 ro,只读)" ;;
+    esac
+    if [[ "${mode}" == "rw" ]]; then
+        warn "进入可写 sqlite shell — 任何 UPDATE/DELETE 都会立刻持久化"
+        warn "建议先 ${CMD_NAME} backup,误操作可恢复"
+        confirm "继续?" "n" || { info "已取消"; return; }
+        sqlite3 "${DB_FILE}"
+    else
+        info "只读模式 (传 'rw' 进入可写)"
+        # `?mode=ro` URI tells sqlite3 to refuse any write attempt.
+        sqlite3 "file:${DB_FILE}?mode=ro" -cmd ".bail on"
+    fi
 }
 
 # ---------- group: doctor ----------
@@ -430,6 +450,287 @@ cmd_version() {
     fi
 }
 
+# ---------- group: SSL/TLS cert (acme.sh integration) ----------
+#
+# 设计要点:
+#   * acme.sh 按需安装到 /root/.acme.sh,不动其他位置
+#   * 证书统一落地 /root/cert/<domain>.cer + .key,匹配面板 cert.go 扫描路径
+#   * CA 故障转移: Let's Encrypt → ZeroSSL → Buypass(任一成功即停)
+#   * 续签靠 crontab(每日 03:00 acme.sh --cron),续签后通过 reloadcmd 自动重启面板
+#   * 三种验证方式覆盖典型场景:
+#       DNS-01 cf       端口无关,推荐(无视宝塔/nginx/CF 橙云)
+#       HTTP-01 webroot 与已有 nginx/宝塔共存,只写挑战文件
+#       HTTP-01 standalone 仅 80 空闲时可用,占用过则报错引导
+
+ACME_DIR="/root/.acme.sh"
+ACME_BIN="${ACME_DIR}/acme.sh"
+CERT_DIR="/root/cert"
+ACME_LOG="${DATA_DIR}/acme.log"
+
+ensure_acme() {
+    if [[ -x "${ACME_BIN}" ]]; then
+        return 0
+    fi
+    info "首次使用,正在安装 acme.sh 到 ${ACME_DIR}"
+    command -v curl >/dev/null || die "缺少 curl。请先 apt install curl 或 yum install curl"
+    # --nocron: 我们用 crontab 统一管理,不用 acme.sh 的内置 cron
+    curl -fsSL https://get.acme.sh | sh -s -- --nocron --home "${ACME_DIR}" >/dev/null \
+        || die "acme.sh 安装失败,见 ${ACME_LOG}"
+    "${ACME_BIN}" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+    ok "acme.sh 已安装"
+}
+
+# 检测端口是否空闲。占用时打印 pid:进程名 并返回非 0。
+check_port_free() {
+    local port="$1" pid_proc
+    if ss -tlnH "( sport = :${port} )" 2>/dev/null | grep -q .; then
+        pid_proc=$(ss -tlnpH "( sport = :${port} )" 2>/dev/null | head -1 \
+            | grep -oP 'users:\(\("\K[^"]+' | head -1)
+        err "端口 ${port} 被占用 (${pid_proc:-unknown}),改用 [1] DNS-01 或 [2] webroot"
+        return 1
+    fi
+    return 0
+}
+
+issue_with_failover() {
+    local domain="$1"; shift
+    local extra=("$@")
+    local cas=("letsencrypt" "zerossl" "buypass")
+    local email="${ACME_EMAIL:-acme@$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo localhost)}"
+    mkdir -p "${CERT_DIR}"
+    for ca in "${cas[@]}"; do
+        info "尝试 CA: ${ca}"
+        # ZeroSSL/Buypass 首次签发前必须 register-account,LE 不需要。
+        # 没注册过时直接 --issue 会失败,导致"故障转移"白白浪费一次尝试。
+        if [[ "$ca" == "zerossl" || "$ca" == "buypass" ]]; then
+            local acct_dir="${ACME_DIR}/ca/acme-${ca}.api"
+            [[ "$ca" == "zerossl" ]] && acct_dir="${ACME_DIR}/ca/acme.zerossl.com"
+            [[ "$ca" == "buypass" ]] && acct_dir="${ACME_DIR}/ca/api.buypass.com"
+            if [[ ! -f "${acct_dir}/account.key" ]]; then
+                info "首次使用 ${ca},注册账号 (email: ${email})"
+                if ! "${ACME_BIN}" --register-account --server "$ca" -m "$email" >> "${ACME_LOG}" 2>&1; then
+                    warn "${ca} 账号注册失败,跳过此 CA"
+                    continue
+                fi
+            fi
+        fi
+        if "${ACME_BIN}" --issue --server "$ca" -d "$domain" "${extra[@]}" 2>&1 | tee -a "${ACME_LOG}"; then
+            ok "${ca} 签发成功"
+            install_cert "$domain"
+            return 0
+        fi
+        warn "${ca} 失败,尝试下一个"
+    done
+    die "所有 CA 都失败,详见 ${ACME_LOG}"
+}
+
+install_cert() {
+    local domain="$1"
+    local cert_path="${CERT_DIR}/${domain}.cer"
+    local key_path="${CERT_DIR}/${domain}.key"
+    "${ACME_BIN}" --install-cert -d "$domain" \
+        --cert-file       "$cert_path" \
+        --key-file        "$key_path" \
+        --fullchain-file  "${CERT_DIR}/${domain}.fullchain.cer" \
+        --reloadcmd       "${CMD_NAME} cert _post-renew ${domain}" >/dev/null \
+        || die "install-cert 失败"
+    chmod 600 "$cert_path" "$key_path"
+    ok "证书已安装: ${cert_path}"
+    register_cron
+}
+
+register_cron() {
+    local cron_line="0 3 * * * ${ACME_BIN} --cron --home ${ACME_DIR} >> ${ACME_LOG} 2>&1"
+    if crontab -l 2>/dev/null | grep -qF "${ACME_BIN} --cron"; then
+        return 0
+    fi
+    (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
+    ok "已注册自动续签 (每日 03:00)"
+}
+
+cmd_cert_apply() {
+    require_root
+    ensure_acme
+
+    local domain="${1:-}"
+    [[ -z "$domain" ]] && read -r -p "  域名 (例 vpn.example.com): " domain
+    [[ -z "$domain" ]] && die "域名不能为空"
+
+    echo
+    echo "  请选择验证方式:"
+    echo "    [1] DNS-01 (推荐, 端口无关) — 需要 Cloudflare API Token"
+    echo "    [2] HTTP-01 webroot       — 与已有 nginx/宝塔共存"
+    echo "    [3] HTTP-01 standalone    — 仅 80 端口空闲时可用"
+    local mode
+    read -r -p "  选择 [1-3, 默认 1]: " mode
+    mode="${mode:-1}"
+
+    case "$mode" in
+        1)
+            local cf_token="${CF_TOKEN:-}"
+            if [[ -z "$cf_token" ]]; then
+                read -rs -p "  Cloudflare API Token (Zone:DNS:Edit 权限): " cf_token
+                echo
+            fi
+            [[ -z "$cf_token" ]] && die "API Token 不能为空"
+            export CF_Token="$cf_token"
+            issue_with_failover "$domain" --dns dns_cf
+            ;;
+        2)
+            local default_root="/www/wwwroot/${domain}" webroot
+            read -r -p "  网站根目录 [默认 ${default_root}]: " webroot
+            webroot="${webroot:-$default_root}"
+            [[ -d "$webroot" ]] || warn "目录不存在: $webroot — 申请可能失败,请确认"
+            echo
+            echo "${Y}!${N} 重要 — 若该域名已开启 Cloudflare 橙云代理(默认开启),"
+            echo "  你必须先去 CF 控制台添加 Configuration Rule:"
+            echo "    匹配:  URI Path  startswith  /.well-known/acme-challenge/"
+            echo "    动作:  Automatic HTTPS Rewrites = Off"
+            echo "           SSL/TLS encryption mode  = Off"
+            echo "           Cache Level              = Bypass"
+            echo "  否则 ACME 服务器的 HTTP 请求会被 CF 跳转到 HTTPS,验证失败。"
+            echo "  如果你的域名没走 CF 或未开启橙云,可直接确认。"
+            echo
+            confirm "已确认上述配置(或本域名未走 CF)?" "n" || { info "已取消"; return 0; }
+            issue_with_failover "$domain" --webroot "$webroot"
+            ;;
+        3)
+            check_port_free 80 || return 1
+            issue_with_failover "$domain" --standalone --httpport 80
+            ;;
+        *)
+            die "无效选择: $mode"
+            ;;
+    esac
+
+    if confirm "是否绑定到面板 (重启面板使 HTTPS 生效)?" n; then
+        cmd_cert_bind_panel "$domain"
+    fi
+}
+
+cmd_cert_list() {
+    [[ -d "$CERT_DIR" ]] || { info "(暂无证书)"; return; }
+    local has_any=false
+    printf "  %-30s %-12s %s\n" "DOMAIN" "EXPIRES" "PATH"
+    for cer in "$CERT_DIR"/*.cer; do
+        [[ -f "$cer" ]] || continue
+        [[ "$cer" == *fullchain* ]] && continue
+        has_any=true
+        local domain expire end
+        domain="$(basename "$cer" .cer)"
+        if end=$(openssl x509 -in "$cer" -noout -enddate 2>/dev/null | cut -d= -f2); then
+            expire="$(date -d "$end" +%Y-%m-%d 2>/dev/null || echo "$end")"
+        else
+            expire="(parse error)"
+        fi
+        printf "  %-30s %-12s %s\n" "$domain" "$expire" "$cer"
+    done
+    ${has_any} || info "(暂无证书)"
+}
+
+cmd_cert_renew() {
+    [[ -x "${ACME_BIN}" ]] || die "acme.sh 未安装,先 ${CMD_NAME} cert apply"
+    local domain="${1:-}"
+    if [[ -n "$domain" ]]; then
+        "${ACME_BIN}" --renew -d "$domain" --force 2>&1 | tee -a "${ACME_LOG}"
+    else
+        "${ACME_BIN}" --cron --home "${ACME_DIR}" 2>&1 | tee -a "${ACME_LOG}"
+    fi
+}
+
+cmd_cert_remove() {
+    local domain="${1:-}"
+    [[ -z "$domain" ]] && read -r -p "  域名: " domain
+    [[ -z "$domain" ]] && die "域名不能为空"
+    confirm "删除 ${domain} 的证书和 acme 配置?" n || return 0
+    [[ -x "${ACME_BIN}" ]] && "${ACME_BIN}" --remove -d "$domain" >/dev/null 2>&1 || true
+    rm -f "${CERT_DIR}/${domain}.cer" "${CERT_DIR}/${domain}.key" \
+          "${CERT_DIR}/${domain}.fullchain.cer"
+    ok "已删除 ${domain}"
+}
+
+# 把指定证书绑定为面板的 HTTPS 证书。直接写 sqlite settings 表,
+# 重启面板后 webCertFile/webKeyFile 立刻生效。
+cmd_cert_bind_panel() {
+    require_installed
+    local domain="${1:-}"
+    [[ -z "$domain" ]] && read -r -p "  域名: " domain
+    [[ -z "$domain" ]] && die "域名不能为空"
+    local cert_path="${CERT_DIR}/${domain}.cer"
+    local key_path="${CERT_DIR}/${domain}.key"
+    [[ -f "$cert_path" ]] || die "证书不存在: ${cert_path}"
+    [[ -f "$key_path" ]]  || die "私钥不存在: ${key_path}"
+    sqlite_set "webCertFile" "$cert_path"
+    sqlite_set "webKeyFile"  "$key_path"
+    ok "已绑定: webCertFile=${cert_path}"
+    if confirm "现在重启面板使配置生效?" y; then
+        cmd_restart
+    else
+        warn "未重启,执行 ${CMD_NAME} restart 后生效"
+    fi
+}
+
+# 内部命令: 由 acme.sh reloadcmd 调用。
+#
+# 面板内置了 TLS 证书热重载(60s 轮询 cert/key 文件 mtime),acme.sh 续签后
+# 直接覆盖 /root/cert/<domain>.cer 与 .key,面板下次 TLS 握手即用新证书,
+# 无需重启进程、不掉现有连接。这里只发个低成本 SIGHUP 加速首次重载窗口
+# (web/main.go 收到 SIGHUP 会重建监听器),不再 systemctl restart。
+#
+# 如果操作员想要强制重启(例如 binary 被换),手动 ${CMD_NAME} restart。
+cmd_cert_post_renew() {
+    local domain="$1"
+    info "证书续签完成: ${domain},发送 SIGHUP 通知面板热重载"
+    if pid=$(systemctl show -p MainPID --value "${SERVICE_NAME}" 2>/dev/null) && [[ -n "${pid}" && "${pid}" != "0" ]]; then
+        kill -HUP "${pid}" 2>/dev/null && return 0
+    fi
+    warn "未取到面板 PID,fallback 到完整 restart"
+    systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
+}
+
+# 通过 sqlite3 写面板设置。settings 表无唯一约束,先 DELETE 再 INSERT 保证幂等。
+sqlite_set() {
+    local key="$1" value="$2"
+    [[ -f "${DB_FILE}" ]] || die "数据库不存在: ${DB_FILE}"
+    command -v sqlite3 >/dev/null || die "缺少 sqlite3。请先 apt install sqlite3"
+    # 转义 SQL 单引号以防注入
+    local k_esc="${key//\'/\'\'}"
+    local v_esc="${value//\'/\'\'}"
+    sqlite3 "${DB_FILE}" \
+        "DELETE FROM settings WHERE key = '${k_esc}'; INSERT INTO settings (key, value) VALUES ('${k_esc}', '${v_esc}');"
+}
+
+cmd_cert() {
+    local sub="${1:-}"; [[ $# -gt 0 ]] && shift
+    case "$sub" in
+        apply|issue)     cmd_cert_apply "$@" ;;
+        list|ls)         cmd_cert_list ;;
+        renew)           cmd_cert_renew "$@" ;;
+        remove|rm|del)   cmd_cert_remove "$@" ;;
+        bind-panel|bind) cmd_cert_bind_panel "$@" ;;
+        _post-renew)     cmd_cert_post_renew "$@" ;;
+        ""|help|-h|--help)
+            cat <<CERTHELP
+${B}cert${N} — SSL/TLS 证书管理 (集成 acme.sh)
+
+  cert apply [domain]            申请证书 (交互式选择验证方式)
+  cert list                      列出已申请的证书
+  cert renew [domain]            手动续签 (省略 domain = 全部)
+  cert remove <domain>           删除证书 + acme 配置
+  cert bind-panel <domain>       绑定为面板的 HTTPS 证书 (自动重启)
+
+  ${D}验证方式:${N}
+    1. DNS-01 (Cloudflare API Token) — 推荐, 端口无关
+    2. HTTP-01 webroot              — 与已有 nginx/宝塔共存
+    3. HTTP-01 standalone            — 仅 80 空闲时可用
+
+  ${D}CA 故障转移:${N} Let's Encrypt → ZeroSSL → Buypass
+CERTHELP
+            ;;
+        *) die "未知 cert 子命令: $sub" ;;
+    esac
+}
+
 # ---------- help ----------
 
 show_help() {
@@ -468,6 +769,13 @@ ${B}health${N}
   doctor                            健康检查(binary/service/port/HTTP)
   version                           运行时版本
 
+${B}cert${N}
+  cert apply [domain]               申请证书 (交互选 DNS-01 / webroot / standalone)
+  cert list                         列出已申请的证书
+  cert renew [domain]               手动续签 (省略 = 全部)
+  cert remove <domain>              删除证书 + acme 配置
+  cert bind-panel <domain>          绑定为面板 HTTPS 证书 (自动重启)
+
 ${B}advanced${N}
   setting -<flag>                   binary 内置 setting 子命令
   exec <args...>                    binary 直通
@@ -504,7 +812,8 @@ show_menu() {
   ${B}5.${N} 重启             ${B}13.${N} 健康检查 (doctor)
   ${B}6.${N} 状态             ${B}14.${N} 备份 / 恢复
   ${B}7.${N} 最近日志         ${B}15.${N} setting 直通
-  ${B}8.${N} 实时日志         ${B}0.${N}  退出
+  ${B}8.${N} 实时日志         ${B}16.${N} SSL 证书 (申请/绑定面板)
+                                ${B}0.${N}  退出
 MENU
     read -p "选择: " ch
     case "$ch" in
@@ -536,6 +845,25 @@ MENU
             fi
             ;;
         15) read -p "  setting flags: " flags; cmd_setting $flags ;;
+        16)
+            cat <<CERTMENU
+
+  ${B}a.${N} 申请证书 (apply)
+  ${B}l.${N} 列出已有 (list)
+  ${B}r.${N} 续签 (renew)
+  ${B}b.${N} 绑定面板 (bind-panel)
+  ${B}d.${N} 删除 (remove)
+CERTMENU
+            read -p "  选择 [a/l/r/b/d]: " sub
+            case "$sub" in
+                a) cmd_cert apply ;;
+                l) cmd_cert list ;;
+                r) read -p "  域名 (留空续签全部): " d; cmd_cert renew "$d" ;;
+                b) read -p "  域名: " d; cmd_cert bind-panel "$d" ;;
+                d) read -p "  域名: " d; cmd_cert remove "$d" ;;
+                *) warn "未知选项" ;;
+            esac
+            ;;
         *) warn "未知选项";;
     esac
 }
@@ -588,6 +916,9 @@ case "$1" in
     # advanced
     setting)      shift; cmd_setting "$@" ;;
     exec)         shift; cmd_exec "$@" ;;
+
+    # SSL/TLS cert
+    cert)         shift; cmd_cert "$@" ;;
 
     -h|--help|help)
         if [[ -n "$2" ]]; then

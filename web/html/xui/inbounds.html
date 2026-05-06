@@ -85,6 +85,15 @@
                                 </template>
                                 <a-tag v-else color="green">无限制</a-tag>
                             </template>
+                            <template slot="onlineIp" slot-scope="text, dbInbound">
+                                <a-tooltip v-if="onlineIpCount(dbInbound) > 0">
+                                    <template slot="title">
+                                        <div v-for="ip in onlineIpList(dbInbound)" :key="ip">[[ ip ]]</div>
+                                    </template>
+                                    <a-tag color="green">[[ onlineIpCount(dbInbound) ]] 台在线</a-tag>
+                                </a-tooltip>
+                                <a-tag v-else color="default">离线</a-tag>
+                            </template>
                             <template slot="settings" slot-scope="text, dbInbound">
                                 <a-button type="link" @click="showInfo(dbInbound)">查看</a-button>
                             </template>
@@ -156,6 +165,11 @@
         width: 150,
         scopedSlots: { customRender: 'traffic' },
     }, {
+        title: "在线 IP",
+        align: 'center',
+        width: 90,
+        scopedSlots: { customRender: 'onlineIp' },
+    }, {
         title: "详细信息",
         align: 'center',
         width: 40,
@@ -181,6 +195,8 @@
             inbounds: [],
             dbInbounds: [],
             searchKey: '',
+            onlineIps: {},      // tag -> [ip,...]
+            onlineIpsTimer: null,
         },
         methods: {
             loading(spinning=true) {
@@ -332,6 +348,21 @@
                     await this.getDBInbounds();
                 }
             },
+            async refreshOnlineIps() {
+                try {
+                    const msg = await HttpUtil.post('/xui/inbound/onlineIps');
+                    if (msg && msg.success && msg.obj) {
+                        this.onlineIps = msg.obj;
+                    }
+                } catch (e) { /* 静默：网络抖动不打扰用户 */ }
+            },
+            onlineIpList(dbInbound) {
+                const list = this.onlineIps[dbInbound.tag];
+                return Array.isArray(list) ? list : [];
+            },
+            onlineIpCount(dbInbound) {
+                return this.onlineIpList(dbInbound).length;
+            },
         },
         watch: {
             searchKey(value) {
@@ -340,6 +371,20 @@
         },
         mounted() {
             this.getDBInbounds();
+            this.refreshOnlineIps();
+            // 每 5 秒刷新一次在线 IP — document.hidden 时直接 skip 避免
+            // 后台标签页持续向 /online-ips 发请求。计时器仍在运行(JS 引擎
+            // 限制后台标签 setInterval 已经至少 1s),但成本只剩比较一个
+            // 布尔。
+            this.onlineIpsTimer = setInterval(() => {
+                if (!document.hidden) this.refreshOnlineIps();
+            }, 5000);
+        },
+        beforeDestroy() {
+            if (this.onlineIpsTimer) {
+                clearInterval(this.onlineIpsTimer);
+                this.onlineIpsTimer = null;
+            }
         },
         computed: {
             total() {

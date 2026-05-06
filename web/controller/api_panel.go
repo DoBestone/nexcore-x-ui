@@ -3,6 +3,7 @@ package controller
 import (
 	"embed"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -64,13 +65,16 @@ func (a *APIPanelController) createToken(c *gin.Context) {
 	// global interceptor inherited from vaxilu/x-ui). ShouldBind picks JSON or
 	// form based on Content-Type, so this works for both browser and curl.
 	var body struct {
-		Name string `json:"name" form:"name"`
+		Name       string `json:"name"        form:"name"`
+		Scope      string `json:"scope"       form:"scope"`
+		TTLSeconds int64  `json:"ttlSeconds"  form:"ttlSeconds"`
 	}
 	if err := c.ShouldBind(&body); err != nil {
 		jsonMsg(c, "创建 token", err)
 		return
 	}
-	t, err := a.tokenService.CreateToken(body.Name)
+	ttl := time.Duration(body.TTLSeconds) * time.Second
+	t, err := a.tokenService.CreateToken(body.Name, body.Scope, ttl)
 	if err != nil {
 		jsonMsg(c, "创建 token", err)
 		return
@@ -79,7 +83,9 @@ func (a *APIPanelController) createToken(c *gin.Context) {
 		"id":        t.Row.Id,
 		"name":      t.Row.Name,
 		"token":     t.Plaintext, // plaintext, exposed once; DB stores SHA256
+		"scope":     t.Row.Scope,
 		"createdAt": t.Row.CreatedAt,
+		"expiresAt": t.Row.ExpiresAt,
 	}, nil)
 }
 

@@ -27,6 +27,13 @@ func (s *ShareService) LinksForInbound(inboundID int, host string) ([]string, er
 	if err != nil {
 		return nil, err
 	}
+	return s.linksForLoadedInbound(in, host)
+}
+
+// linksForLoadedInbound is the actual link generator. SubscriptionForAll
+// uses it to skip the redundant per-inbound GetInbound() call that
+// otherwise turns one /subscription request into 2*N+1 sqlite reads.
+func (s *ShareService) linksForLoadedInbound(in *model.Inbound, host string) ([]string, error) {
 	clients, _, err := readClients(in)
 	if err != nil {
 		return nil, err
@@ -85,6 +92,11 @@ func (s *ShareService) SubscriptionForInbound(inboundID int, host string) (strin
 
 // SubscriptionForAll merges links from every inbound into one subscription.
 // Disabled inbounds are skipped so revoked nodes drop out of clients on poll.
+//
+// Single-DB-query path: GetAllInbounds gives us already-hydrated rows;
+// linksForLoadedInbound consumes them directly instead of re-querying
+// per row. For a panel with N enabled inbounds this collapses 2N+1 DB
+// calls into 1 — measurable on a 50-inbound deployment.
 func (s *ShareService) SubscriptionForAll(host string) (string, error) {
 	items, err := s.inboundService.GetAllInbounds()
 	if err != nil {
@@ -95,7 +107,7 @@ func (s *ShareService) SubscriptionForAll(host string) (string, error) {
 		if !in.Enable {
 			continue
 		}
-		links, err := s.LinksForInbound(in.Id, host)
+		links, err := s.linksForLoadedInbound(in, host)
 		if err != nil {
 			continue
 		}

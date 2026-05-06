@@ -87,12 +87,51 @@ func pureJsonMsg(c *gin.Context, success bool, msg string) {
 	}
 }
 
+// sensitiveQueryParams are the names we redact before reflecting the
+// request URI back into a template. Any future "we leak ?token=..."
+// regression gets neutered before it reaches the user's browser
+// history / referer chain.
+var sensitiveQueryParams = map[string]bool{
+	"api_token":  true,
+	"token":      true,
+	"password":   true,
+	"passwd":     true,
+	"secret":     true,
+	"key":        true,
+}
+
+// redactRequestURI returns the request URI with any query parameter in
+// sensitiveQueryParams replaced by "<redacted>". The path component is
+// left intact so back-link logic still works after a session expiry
+// redirect.
+func redactRequestURI(rawURI string) string {
+	q := strings.IndexByte(rawURI, '?')
+	if q < 0 {
+		return rawURI
+	}
+	pathPart, queryPart := rawURI[:q], rawURI[q+1:]
+	pairs := strings.Split(queryPart, "&")
+	for i, p := range pairs {
+		eq := strings.IndexByte(p, '=')
+		var name string
+		if eq < 0 {
+			name = p
+		} else {
+			name = p[:eq]
+		}
+		if sensitiveQueryParams[strings.ToLower(name)] {
+			pairs[i] = name + "=<redacted>"
+		}
+	}
+	return pathPart + "?" + strings.Join(pairs, "&")
+}
+
 func html(c *gin.Context, name string, title string, data gin.H) {
 	if data == nil {
 		data = gin.H{}
 	}
 	data["title"] = title
-	data["request_uri"] = c.Request.RequestURI
+	data["request_uri"] = redactRequestURI(c.Request.RequestURI)
 	data["base_path"] = c.GetString("base_path")
 	c.HTML(http.StatusOK, name, getContext(data))
 }

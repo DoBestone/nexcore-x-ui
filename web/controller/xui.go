@@ -7,9 +7,10 @@ import (
 type XUIController struct {
 	BaseController
 
-	inboundController  *InboundController
-	settingController  *SettingController
-	apiPanelController *APIPanelController
+	inboundController   *InboundController
+	settingController   *SettingController
+	apiPanelController  *APIPanelController
+	blockRuleController *BlockRuleController
 }
 
 func NewXUIController(g *gin.RouterGroup) *XUIController {
@@ -26,10 +27,12 @@ func (a *XUIController) initRouter(g *gin.RouterGroup) {
 	g.GET("/inbounds", a.inbounds)
 	g.GET("/setting", a.setting)
 	g.GET("/api-console", a.apiConsole)
+	g.GET("/block-rules", a.blockRules)
 
 	a.inboundController = NewInboundController(g)
 	a.settingController = NewSettingController(g)
 	a.apiPanelController = NewAPIPanelController(g)
+	a.blockRuleController = NewBlockRuleController(g)
 }
 
 func (a *XUIController) index(c *gin.Context) {
@@ -46,4 +49,8 @@ func (a *XUIController) setting(c *gin.Context) {
 
 func (a *XUIController) apiConsole(c *gin.Context) {
 	html(c, "api_console.html", "API 控制台", nil)
+}
+
+func (a *XUIController) blockRules(c *gin.Context) {
+	html(c, "block_rules.html", "屏蔽规则", nil)
 }

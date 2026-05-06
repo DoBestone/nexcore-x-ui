@@ -1,6 +1,7 @@
 package web
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"embed"
@@ -9,9 +10,11 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"nexcore-x-ui/config"
 	"nexcore-x-ui/logger"
@@ -37,6 +40,244 @@ var assetsFS embed.FS
 
 //go:embed html/*
 var htmlFS embed.FS
+
+// securityHeadersMiddleware applies a conservative set of headers to
+// every panel response. They cost nothing on the server and make a
+// large class of browser-side bugs (clickjacking, MIME sniffing of an
+// uploaded file as HTML, stray inline scripts) harder to exploit. The
+// CSP is deliberately permissive on inline styles/scripts because the
+// upstream vaxilu/x-ui panel still relies on inline event handlers and
+// inline <style>; tightening that requires a frontend rewrite. We do
+// forbid object/embed sources and frame-ancestors entirely, which
+// covers the most common XSS payload styles without breaking the UI.
+func securityHeadersMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		h := c.Writer.Header()
+		// Pre-set so handlers that send their own Content-Type still
+		// get the security headers attached.
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Permissions-Policy",
+			"accelerometer=(), camera=(), geolocation=(), gyroscope=(), "+
+				"magnetometer=(), microphone=(), payment=(), usb=()")
+		// CSP — frame-ancestors gives anti-clickjacking even on browsers
+		// that ignore X-Frame-Options. 'unsafe-inline' is required for the
+		// legacy template's inline handlers; the rest is locked down.
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self' 'unsafe-inline' 'unsafe-eval'; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data: blob:; "+
+				"font-src 'self' data:; "+
+				"connect-src 'self'; "+
+				"frame-ancestors 'none'; "+
+				"object-src 'none'; "+
+				"base-uri 'self'; "+
+				"form-action 'self'")
+		c.Next()
+	}
+}
+
+// gzipMiddleware compresses responses for clients that send
+// Accept-Encoding: gzip. Stdlib compress/gzip — no new dependency. We
+// skip:
+//   - clients that didn't ask for it
+//   - already-encoded responses (e.g. our static .gz files, or images
+//     where Content-Type already starts with image/ video/ audio/)
+//   - very small bodies where gzip overhead exceeds the savings
+//
+// The big win: bundled vue.min.js / antd.min.js (≈3MB combined as
+// audited) compress to ~25% of their original size, cutting first-load
+// payload from 5MB+ to ~1.3MB. JSON API responses also benefit on
+// inbounds list / subscription endpoints.
+func gzipMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !strings.Contains(c.GetHeader("Accept-Encoding"), "gzip") {
+			c.Next()
+			return
+		}
+		// Skip the SSE-ish / streaming endpoints if any handler ever
+		// adds them. We don't have any today, but this guard is cheap.
+		if c.GetHeader("Connection") == "Upgrade" {
+			c.Next()
+			return
+		}
+		gz := acquireGzipWriter(c.Writer)
+		defer releaseGzipWriter(gz)
+		c.Writer = &gzipResponseWriter{ResponseWriter: c.Writer, gz: gz}
+		c.Header("Vary", "Accept-Encoding")
+		c.Next()
+		_ = gz.Close()
+	}
+}
+
+// gzipResponseWriter only kicks in compression on the first Write that
+// has a body large enough to be worth it. For tiny replies (<1KB) we
+// pass through plain — the encoding header is set lazily so the client
+// sees identity-encoded responses for short bodies.
+type gzipResponseWriter struct {
+	gin.ResponseWriter
+	gz       *gzip.Writer
+	wroteHdr bool
+	gzipped  bool
+	buffered []byte
+}
+
+const gzipMinSize = 1024
+
+func (w *gzipResponseWriter) WriteHeader(status int) {
+	w.wroteHdr = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *gzipResponseWriter) Write(p []byte) (int, error) {
+	if w.gzipped {
+		return w.gz.Write(p)
+	}
+	// Don't compress already-compressed payloads (image/, video/,
+	// audio/, application/zip, etc.). Look at Content-Type AFTER the
+	// handler has set it — Gin's default ResponseWriter populates
+	// Content-Type via http.DetectContentType when not set.
+	ct := w.Header().Get("Content-Type")
+	if ce := w.Header().Get("Content-Encoding"); ce != "" {
+		// Some upstream already encoded it.
+		return w.ResponseWriter.Write(p)
+	}
+	if isCompressedContentType(ct) {
+		return w.ResponseWriter.Write(p)
+	}
+	w.buffered = append(w.buffered, p...)
+	if len(w.buffered) < gzipMinSize {
+		return len(p), nil
+	}
+	w.gzipped = true
+	w.Header().Set("Content-Encoding", "gzip")
+	w.Header().Del("Content-Length") // body will change size
+	if _, err := w.gz.Write(w.buffered); err != nil {
+		return 0, err
+	}
+	w.buffered = nil
+	return len(p), nil
+}
+
+func (w *gzipResponseWriter) Flush() {
+	// Drain the buffered tail. If we never crossed the gzip threshold
+	// flush it as plain bytes; otherwise flush the gzip stream.
+	if !w.gzipped && len(w.buffered) > 0 {
+		_, _ = w.ResponseWriter.Write(w.buffered)
+		w.buffered = nil
+	}
+	if w.gzipped {
+		_ = w.gz.Flush()
+	}
+	w.ResponseWriter.Flush()
+}
+
+func isCompressedContentType(ct string) bool {
+	if ct == "" {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(ct, "image/"):
+		// SVG is text and worth compressing; everything else (png, jpeg,
+		// webp, gif) is already compressed.
+		return !strings.Contains(ct, "svg")
+	case strings.HasPrefix(ct, "video/"),
+		strings.HasPrefix(ct, "audio/"),
+		strings.HasPrefix(ct, "application/zip"),
+		strings.HasPrefix(ct, "application/gzip"),
+		strings.HasPrefix(ct, "application/x-gzip"),
+		strings.HasPrefix(ct, "application/x-bzip2"),
+		strings.HasPrefix(ct, "application/x-xz"):
+		return true
+	}
+	return false
+}
+
+// gzipWriterPool reuses gzip.Writer instances. Allocating one per
+// request churns the heap; with the pool the per-request cost is a
+// channel-free Get + Reset, ~150 ns.
+var gzipWriterPool = sync.Pool{
+	New: func() any {
+		w, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+		return w
+	},
+}
+
+func acquireGzipWriter(w io.Writer) *gzip.Writer {
+	gz := gzipWriterPool.Get().(*gzip.Writer)
+	gz.Reset(w)
+	return gz
+}
+
+func releaseGzipWriter(gz *gzip.Writer) {
+	gz.Reset(io.Discard)
+	gzipWriterPool.Put(gz)
+}
+
+// maxBodyBytes caps every request body that the panel reads. Without
+// this Gin happily slurps unbounded input — a single attacker on a
+// throttled link could fill memory by streaming a multi-GB JSON body.
+// The xray template upload (PUT /api/v1/xray/template) is the only
+// legitimate "large" body and even that fits well under this ceiling
+// for any realistic xray config.
+const maxBodyBytes = 8 << 20 // 8MB
+
+// limitBodyMiddleware wraps c.Request.Body in http.MaxBytesReader. Any
+// downstream handler that c.GetRawData / c.ShouldBindJSON / c.Request.Body.Read
+// past the limit will get an EOF/error and should respond 413 — which
+// is what BadRequest "invalid_body" already maps to in practice.
+func limitBodyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Body != nil {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodyBytes)
+		}
+		c.Next()
+	}
+}
+
+// originCSRFMiddleware rejects state-changing requests whose Origin (or
+// Referer) header doesn't match the request Host. Standard browser-side
+// CSRF defense: cross-origin pages that issue a POST will carry an
+// Origin (or at minimum Referer) header pointing at their own origin,
+// not at the panel's. SameSite=Lax already blocks most of these but a
+// malicious sibling subdomain still slips through; this closes that gap.
+//
+// GET/HEAD/OPTIONS are exempt (they're supposed to be side-effect-free).
+func originCSRFMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		switch c.Request.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			c.Next()
+			return
+		}
+		var headerHost string
+		if origin := c.GetHeader("Origin"); origin != "" {
+			if u, err := neturl.Parse(origin); err == nil {
+				headerHost = u.Host
+			}
+		} else if ref := c.GetHeader("Referer"); ref != "" {
+			if u, err := neturl.Parse(ref); err == nil {
+				headerHost = u.Host
+			}
+		} else {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"msg":     "missing Origin/Referer on state-changing request",
+			})
+			return
+		}
+		if headerHost == "" || !strings.EqualFold(headerHost, c.Request.Host) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"msg":     "cross-origin request blocked",
+			})
+			return
+		}
+		c.Next()
+	}
+}
 
 //go:embed translation/*
 var i18nFS embed.FS
@@ -82,6 +323,7 @@ func (f *wrapAssetsFileInfo) ModTime() time.Time {
 type Server struct {
 	httpServer *http.Server
 	listener   net.Listener
+	certLoader *network.CertLoader // nil when running plain HTTP
 
 	index  *controller.IndexController
 	server *controller.ServerController
@@ -159,7 +401,28 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	engine := gin.Default()
+	// gin.New() instead of gin.Default(): we explicitly mount only the
+	// middleware we need. gin.Default() also bolts on a stdout request
+	// logger that, in production where stdout is io.Discard'd anyway,
+	// still costs sprintf+time formatting per request. Recovery alone
+	// is what we actually want from "Default".
+	engine := gin.New()
+	engine.Use(gin.Recovery())
+	if config.IsDebug() {
+		// Only spend the formatting budget when debug logs are wanted.
+		engine.Use(gin.Logger())
+	}
+	// gzip first so other middlewares' bodies also benefit. Skipping
+	// the compression for static images / already-encoded content is
+	// handled inside the middleware.
+	engine.Use(gzipMiddleware())
+	// Body size cap applies to every route — panel POSTs, /api/v1, magic
+	// link, the lot. Mounted on the root engine so it runs before any
+	// per-group middleware reads the body.
+	engine.Use(limitBodyMiddleware())
+	// Security headers also live at the root so HTML pages, JSON
+	// responses, and static assets all get them.
+	engine.Use(securityHeadersMiddleware())
 
 	secret, err := s.settingService.GetSecret()
 	if err != nil {
@@ -217,6 +480,15 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	}
 
 	g := engine.Group(basePath)
+	// CSRF defense for the cookie-authenticated panel: state-changing
+	// methods must come with an Origin (or, fallback, Referer) header
+	// whose host matches the request Host. SameSite=Lax already blocks
+	// the most common cross-site POST vectors but a malicious page
+	// inside the same eTLD+1 (subdomain takeover, internal proxy) can
+	// still issue a top-level POST; the Origin check closes that gap.
+	// API token routes are NOT cookie-authed and don't need this — they
+	// live under engine.Group("api/v1") and skip the middleware below.
+	g.Use(originCSRFMiddleware())
 
 	s.index = controller.NewIndexController(g)
 	s.server = controller.NewServerController(g)
@@ -314,9 +586,37 @@ func (s *Server) initI18n(engine *gin.Engine) error {
 		})
 	}
 
+	// Cache localizers by Accept-Language header. NewLocalizer parses
+	// the header into a tag list and matches against the bundle —
+	// neither is huge work, but doing it on every request was pure
+	// waste because the same browser sends the same header every time.
+	// Bounded so a flood of distinct fake Accept-Language values can't
+	// grow the map without bound.
+	const localizerCacheCap = 128
+	var (
+		localizerCacheMu sync.Mutex
+		localizerCache   = map[string]*i18n.Localizer{}
+	)
 	engine.Use(func(c *gin.Context) {
 		accept := c.GetHeader("Accept-Language")
-		localizer = i18n.NewLocalizer(bundle, accept)
+		localizerCacheMu.Lock()
+		l, ok := localizerCache[accept]
+		if !ok {
+			if len(localizerCache) >= localizerCacheCap {
+				// Evict an arbitrary entry (Go's map iteration order
+				// is randomized, so this is effectively random
+				// eviction) — fine for a 128-cap cache where a real
+				// LRU would dominate the cost we're trying to save.
+				for k := range localizerCache {
+					delete(localizerCache, k)
+					break
+				}
+			}
+			l = i18n.NewLocalizer(bundle, accept)
+			localizerCache[accept] = l
+		}
+		localizerCacheMu.Unlock()
+		localizer = l
 		c.Set("localizer", localizer)
 		c.Next()
 	})
@@ -408,18 +708,26 @@ func (s *Server) Start() (err error) {
 		return err
 	}
 	if certFile != "" || keyFile != "" {
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		// Hot-reloading loader: re-parses the cert+key whenever either
+		// file's mtime changes (acme.sh / certbot post-renew hooks just
+		// overwrite the files; we pick up the new pair on the next
+		// handshake without dropping live connections). Eager initial
+		// load fails loud so a missing/garbage cert at boot doesn't
+		// silently downgrade us to plain HTTP.
+		loader, err := network.NewCertLoader(certFile, keyFile)
 		if err != nil {
 			listener.Close()
 			return err
 		}
+		network.SetLogger(func(e error) { logger.Warning("tls cert reload:", e) })
+		s.certLoader = loader
 		// MinVersion locked to 1.2 — TLS 1.0/1.1 are deprecated and have
 		// known weaknesses (BEAST, POODLE, weak hash for handshake).
 		// CipherSuites is left nil so Go's default secure-by-default
 		// list applies for TLS 1.2; TLS 1.3 ignores the field.
 		c := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
+			GetCertificate: loader.GetCertificate,
+			MinVersion:     tls.VersionTLS12,
 		}
 		listener = network.NewAutoHttpsListener(listener)
 		listener = tls.NewListener(listener, c)
@@ -436,6 +744,17 @@ func (s *Server) Start() (err error) {
 
 	s.httpServer = &http.Server{
 		Handler: engine,
+		// Without these the server lets a slow client hold a goroutine
+		// indefinitely (Slowloris). Tune wide enough for the legitimate
+		// large requests — uploading an xray template / large cert PEM
+		// over a slow link — but tight enough to drop intentional drips.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// Cap header bytes at 1MB. Default is also 1MB but being
+		// explicit makes the intent visible to anyone tuning this later.
+		MaxHeaderBytes: 1 << 20,
 	}
 
 	go func() {
@@ -450,6 +769,9 @@ func (s *Server) Stop() error {
 	s.xrayService.StopXray()
 	if s.cron != nil {
 		s.cron.Stop()
+	}
+	if s.certLoader != nil {
+		s.certLoader.Close()
 	}
 	var err1 error
 	var err2 error

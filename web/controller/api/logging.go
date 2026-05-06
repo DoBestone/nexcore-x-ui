@@ -10,9 +10,15 @@ import (
 	"nexcore-x-ui/web/service"
 )
 
-// AccessLogMiddleware records one APILog row per /api/v1 call. Skipped
-// paths are listed below to avoid drowning the table in health-check
-// noise — adjust as needed.
+// AccessLogMiddleware records one APILog row per /api/v1 call. We log
+// only the *route template* (FullPath) — never the raw request URI —
+// so a leaked token or password that some future caller stuffs into a
+// query string can't end up persisted. The fallback when FullPath is
+// empty (route didn't match) uses URL.Path which by definition excludes
+// the query.
+//
+// Skipped paths are listed below to avoid drowning the table in
+// health-check noise — adjust as needed.
 func AccessLogMiddleware(logs *service.APILogService) gin.HandlerFunc {
 	skip := map[string]bool{
 		"health": true,
@@ -23,6 +29,8 @@ func AccessLogMiddleware(logs *service.APILogService) gin.HandlerFunc {
 
 		path := c.FullPath()
 		if path == "" {
+			// URL.Path is the path component only — no scheme, no host,
+			// no query. Safe to log even if the request had ?api_token=.
 			path = c.Request.URL.Path
 		}
 		// FullPath uses the route template (e.g. /api/v1/inbounds/:id).

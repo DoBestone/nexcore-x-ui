@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -115,6 +116,12 @@ func (a *IndexController) index(c *gin.Context) {
 
 func (a *IndexController) login(c *gin.Context) {
 	ip := getRemoteIp(c)
+
+	// IP-keyed throttle blocks single-source brute-force. We *also*
+	// check before the form is even parsed, so a flood of malformed
+	// payloads (where strings.ToLower would crash) doesn't sidestep
+	// the limit. The user-name-keyed check happens after we know the
+	// username, to add account-level lockout on top of IP.
 	if wait := loginThrottle.retryAfter(ip); wait > 0 {
 		c.Header("Retry-After", time.Duration(wait*int(time.Second)).String())
 		logger.Warningf("login throttled for %s (retry after %ds)", ip, wait)
@@ -136,16 +143,26 @@ func (a *IndexController) login(c *gin.Context) {
 		pureJsonMsg(c, false, "请输入密码")
 		return
 	}
+	userKey := "user:" + strings.ToLower(strings.TrimSpace(form.Username))
+	if wait := loginThrottle.retryAfter(userKey); wait > 0 {
+		c.Header("Retry-After", time.Duration(wait*int(time.Second)).String())
+		logger.Warningf("login throttled for username %q (retry after %ds)", form.Username, wait)
+		pureJsonMsg(c, false, "该账号登录尝试过于频繁,请稍后再试")
+		return
+	}
+
 	user := a.userService.CheckUser(form.Username, form.Password)
 	timeStr := time.Now().Format("2006-01-02 15:04:05")
 	if user == nil {
 		loginThrottle.recordFailure(ip)
+		loginThrottle.recordFailure(userKey)
 		job.NewStatsNotifyJob().UserLoginNotify(form.Username, ip, timeStr, 0)
 		logger.Infof("login failed for user %q from %s", form.Username, ip)
 		pureJsonMsg(c, false, "用户名或密码错误")
 		return
 	}
 	loginThrottle.recordSuccess(ip)
+	loginThrottle.recordSuccess(userKey)
 	logger.Infof("%s login success,Ip Address:%s\n", form.Username, ip)
 	job.NewStatsNotifyJob().UserLoginNotify(form.Username, ip, timeStr, 1)
 

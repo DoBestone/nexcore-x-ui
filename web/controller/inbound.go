@@ -30,6 +30,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/add", a.addInbound)
 	g.POST("/del/:id", a.delInbound)
 	g.POST("/update/:id", a.updateInbound)
+	g.POST("/onlineIps", a.getOnlineIps)
 }
 
 func (a *InboundController) startTask() {
@@ -84,6 +85,12 @@ func (a *InboundController) delInbound(c *gin.Context) {
 	if err == nil {
 		a.xrayService.SetToNeedRestart()
 	}
+}
+
+// getOnlineIps 返回每个入站当前活跃的源 IP 列表（运行时数据，60s TTL）。
+// 前端入站列表用它显示"在线 IP 数"，业务系统也可以读它做设备数判定。
+func (a *InboundController) getOnlineIps(c *gin.Context) {
+	jsonObj(c, service.GetOnlineIPService().GetAllIPs(), nil)
 }
 
 func (a *InboundController) updateInbound(c *gin.Context) {

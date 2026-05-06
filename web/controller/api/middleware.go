@@ -5,9 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"nexcore-x-ui/logger"
 	"nexcore-x-ui/web/service"
 )
 
@@ -38,6 +41,7 @@ func AuthMiddleware(settings *service.SettingService, tokens *service.APITokenSe
 			tokens.TouchLastUsed(t.Id)
 			c.Set("api_token_id", t.Id)
 			c.Set("api_token_name", t.Name)
+			c.Set("api_token_scope", t.Scope)
 			c.Next()
 			return
 		} else if !errors.Is(err, service.ErrTokenNotFound) {
@@ -48,7 +52,9 @@ func AuthMiddleware(settings *service.SettingService, tokens *service.APITokenSe
 		want, err := settings.GetAPIToken()
 		if err == nil && want != "" &&
 			subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 {
+			warnLegacyTokenOnce(c.ClientIP())
 			c.Set("api_token_name", "legacy")
+			c.Set("api_token_scope", service.ScopeAdmin)
 			c.Next()
 			return
 		}
@@ -75,4 +81,82 @@ func Unauthorized(c *gin.Context, code string) {
 		Code:    code,
 		Message: "authentication required",
 	})
+}
+
+// legacyTokenSeen rate-limits the "legacy single-token in use" warning
+// so a busy integration doesn't spam the log: at most one line per IP
+// per hour. Bounded to legacyTokenSeenCap entries with LRU eviction —
+// the previous "delete stale entries when over 1024" approach left
+// space for unbounded growth if the entries weren't actually stale,
+// e.g. a constant-rate scanner from many IPs.
+const legacyTokenSeenCap = 4096
+
+var (
+	legacyTokenSeenMu sync.Mutex
+	legacyTokenSeen   = map[string]time.Time{}
+)
+
+func warnLegacyTokenOnce(ip string) {
+	now := time.Now()
+	legacyTokenSeenMu.Lock()
+	last := legacyTokenSeen[ip]
+	if !last.IsZero() && now.Sub(last) < time.Hour {
+		legacyTokenSeenMu.Unlock()
+		return
+	}
+	if len(legacyTokenSeen) >= legacyTokenSeenCap {
+		// Hard cap: walk the map once and drop the oldest half. O(N)
+		// but only fires every 4096/2 = 2048 distinct hours' worth of
+		// new IPs, so amortized cost is negligible. Using a real LRU
+		// (doubly-linked list) here would be overkill for a logging
+		// gate.
+		oldest := time.Now()
+		var oldestKey string
+		for k, v := range legacyTokenSeen {
+			if v.Before(oldest) {
+				oldest = v
+				oldestKey = k
+			}
+		}
+		// Drop everything older than the oldest+30min — typically half
+		// the map.
+		cutoff := oldest.Add(30 * time.Minute)
+		for k, v := range legacyTokenSeen {
+			if v.Before(cutoff) {
+				delete(legacyTokenSeen, k)
+			}
+		}
+		_ = oldestKey
+	}
+	legacyTokenSeen[ip] = now
+	legacyTokenSeenMu.Unlock()
+	logger.Warningf(
+		"legacy single-token in use from %s — issue a scoped multi-token via "+
+			"`nexcore-x-ui` panel → API 控制台 and rotate the legacy one with "+
+			"POST /api/v1/settings/api-token/rotate", ip)
+}
+
+// RequireScope produces a middleware that aborts with 403 unless the
+// authenticated token's scope is in the allowed set. Use it to gate
+// dangerous endpoints (admin-only) or read-only ones.
+//
+// Mount this AFTER AuthMiddleware so api_token_scope is populated.
+func RequireScope(allowed ...string) gin.HandlerFunc {
+	allow := make(map[string]bool, len(allowed))
+	for _, s := range allowed {
+		allow[s] = true
+	}
+	return func(c *gin.Context) {
+		got, _ := c.Get("api_token_scope")
+		scope, _ := got.(string)
+		if scope == "" || !allow[scope] {
+			c.AbortWithStatusJSON(http.StatusForbidden, ErrorResp{
+				Error:   true,
+				Code:    "scope_forbidden",
+				Message: "this token's scope does not allow this action",
+			})
+			return
+		}
+		c.Next()
+	}
 }

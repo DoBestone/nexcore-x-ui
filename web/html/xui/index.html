@@ -398,11 +398,16 @@
         },
         async mounted() {
             this.checkPanelUpdate();
+            // 后台标签页(document.hidden=true)期间暂停轮询。10 个标签
+            // 同时打开 / 操作员把面板拖到背景时,原本每 2s 一次的状态请求
+            // 会在所有标签上并发触发,无谓消耗服务器连接与电量。
             while (true) {
-                try {
-                    await this.getStatus();
-                } catch (e) {
-                    console.error(e);
+                if (!document.hidden) {
+                    try {
+                        await this.getStatus();
+                    } catch (e) {
+                        console.error(e);
+                    }
                 }
                 await PromiseUtil.sleep(2000);
             }

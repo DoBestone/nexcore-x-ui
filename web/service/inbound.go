@@ -1,8 +1,12 @@
 package service
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
+
 	"nexcore-x-ui/database"
 	"nexcore-x-ui/database/model"
 	"nexcore-x-ui/util/common"
@@ -11,7 +15,92 @@ import (
 	"gorm.io/gorm"
 )
 
+// ErrProtocolSingleton is returned when an operator tries to add a second
+// inbound for a protocol that supports multi-user via settings.clients[]
+// (vless / vmess / trojan / shadowsocks-2022). Those protocols are designed
+// to share one port across many users; allowing two separate inbounds is
+// always a mistake — they'd just compete for the same port. The right move
+// is to edit the existing inbound and add a client there.
+var ErrProtocolSingleton = errors.New("protocol_singleton")
+
 type InboundService struct {
+}
+
+// isMultiUserProtocol reports whether the given inbound's protocol supports
+// multi-user via settings.clients[]. Shadowsocks is a special case: only the
+// 2022-blake3-* AEAD methods support clients[]; legacy AEAD/stream methods
+// are single-user (one password = one user) and we let those duplicate.
+func isMultiUserProtocol(in *model.Inbound) bool {
+	switch in.Protocol {
+	case model.VLESS, model.VMess, model.Trojan:
+		return true
+	case model.Shadowsocks:
+		var s struct {
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal([]byte(in.Settings), &s)
+		return strings.HasPrefix(s.Method, "2022-blake3-")
+	}
+	return false
+}
+
+// checkProtocolSingleton enforces "one inbound per multi-user protocol".
+// ignoreId > 0 means "we're updating that inbound, don't count it against
+// itself". Returns ErrProtocolSingleton on conflict.
+func (s *InboundService) checkProtocolSingleton(in *model.Inbound, ignoreId int) error {
+	if !isMultiUserProtocol(in) {
+		return nil
+	}
+	db := database.GetDB().Model(model.Inbound{}).Where("protocol = ?", string(in.Protocol))
+	if ignoreId > 0 {
+		db = db.Where("id != ?", ignoreId)
+	}
+	// For shadowsocks we have to filter further: only 2022-blake3-* peers
+	// are singletons. Legacy SS rows in DB stay free to coexist.
+	var rows []*model.Inbound
+	if err := db.Find(&rows).Error; err != nil {
+		return err
+	}
+	for _, r := range rows {
+		if isMultiUserProtocol(r) {
+			return fmt.Errorf("%w: protocol %s already has inbound id=%d, edit that one and add a client instead",
+				ErrProtocolSingleton, in.Protocol, r.Id)
+		}
+	}
+	return nil
+}
+
+// dryRunWithReplacement simulates the persisted inbound list with one
+// hypothetical change applied (add new / replace existing / remove by id),
+// then asks xray to validate the resulting config.
+//
+// Mode:
+//   - replace == nil && removeId == 0: just validate current state
+//   - replace != nil && replace.Id == 0: append as new
+//   - replace != nil && replace.Id > 0: substitute the row with that id
+//   - removeId > 0: drop the row with that id
+func (s *InboundService) dryRunWithReplacement(replace *model.Inbound, removeId int) error {
+	all, err := s.GetAllInbounds()
+	if err != nil {
+		return err
+	}
+	candidate := make([]*model.Inbound, 0, len(all)+1)
+	replaced := false
+	for _, in := range all {
+		if removeId > 0 && in.Id == removeId {
+			continue
+		}
+		if replace != nil && replace.Id > 0 && in.Id == replace.Id {
+			candidate = append(candidate, replace)
+			replaced = true
+			continue
+		}
+		candidate = append(candidate, in)
+	}
+	if replace != nil && !replaced && replace.Id == 0 {
+		candidate = append(candidate, replace)
+	}
+	return GetXrayServiceForDryRun().DryRunInbounds(candidate)
 }
 
 func (s *InboundService) GetInbounds(userId int) ([]*model.Inbound, error) {
@@ -56,24 +145,86 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) error {
 	if exist {
 		return common.NewError("端口已存在:", inbound.Port)
 	}
+	if err := s.checkProtocolSingleton(inbound, 0); err != nil {
+		return err
+	}
+	// xray dry-run BEFORE writing the DB. If we wrote first and xray then
+	// rejected the resulting config, the panel would still hold a row that
+	// breaks every other inbound on the next reload. The Id is 0 here, so
+	// dryRunWithReplacement appends `inbound` as a new candidate.
+	if inbound.Enable {
+		if err := s.dryRunWithReplacement(inbound, 0); err != nil {
+			return err
+		}
+	}
 	db := database.GetDB()
 	return db.Save(inbound).Error
 }
 
 func (s *InboundService) AddInbounds(inbounds []*model.Inbound) error {
-	for _, inbound := range inbounds {
-		exist, err := s.checkPortExist(inbound.Port, 0)
-		if err != nil {
+	// Single round-trip port collision check: pull every existing port
+	// in one SELECT, build an in-memory set, then validate the batch
+	// (also catches duplicates *within* the batch). Replaces the prior
+	// O(N) checkPortExist loop which fired one COUNT(*) per item — at
+	// 100 inbounds in a bulk import that's 100 wasted DB calls.
+	db := database.GetDB()
+	wantPorts := make([]int, 0, len(inbounds))
+	for _, in := range inbounds {
+		wantPorts = append(wantPorts, in.Port)
+	}
+	var taken []int
+	if len(wantPorts) > 0 {
+		if err := db.Model(&model.Inbound{}).
+			Where("port IN ?", wantPorts).
+			Pluck("port", &taken).Error; err != nil {
 			return err
 		}
-		if exist {
-			return common.NewError("端口已存在:", inbound.Port)
+	}
+	exists := make(map[int]struct{}, len(taken))
+	for _, p := range taken {
+		exists[p] = struct{}{}
+	}
+	seen := make(map[int]struct{}, len(inbounds))
+	seenSingleton := map[model.Protocol]bool{}
+	for _, in := range inbounds {
+		if _, dup := seen[in.Port]; dup {
+			return common.NewError("批次内端口重复:", in.Port)
+		}
+		seen[in.Port] = struct{}{}
+		if _, taken := exists[in.Port]; taken {
+			return common.NewError("端口已存在:", in.Port)
+		}
+		if err := s.checkProtocolSingleton(in, 0); err != nil {
+			return err
+		}
+		// Two new VLESS rows in one batch is also illegal.
+		if isMultiUserProtocol(in) {
+			if seenSingleton[in.Protocol] {
+				return fmt.Errorf("%w: protocol %s appears twice in this batch",
+					ErrProtocolSingleton, in.Protocol)
+			}
+			seenSingleton[in.Protocol] = true
 		}
 	}
 
-	db := database.GetDB()
+	// Dry-run with the entire batch applied. Cross-inbound issues (tag
+	// collisions inside the template, etc.) only show up when xray sees
+	// them all at once — per-row validation isn't enough.
+	all, err := s.GetAllInbounds()
+	if err != nil {
+		return err
+	}
+	candidate := append([]*model.Inbound{}, all...)
+	for _, in := range inbounds {
+		if in.Enable {
+			candidate = append(candidate, in)
+		}
+	}
+	if err := GetXrayServiceForDryRun().DryRunInbounds(candidate); err != nil {
+		return err
+	}
+
 	tx := db.Begin()
-	var err error
 	defer func() {
 		if err == nil {
 			tx.Commit()
@@ -81,14 +232,12 @@ func (s *InboundService) AddInbounds(inbounds []*model.Inbound) error {
 			tx.Rollback()
 		}
 	}()
-
 	for _, inbound := range inbounds {
 		err = tx.Save(inbound).Error
 		if err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -115,6 +264,9 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 	if exist {
 		return common.NewError("端口已存在:", inbound.Port)
 	}
+	if err := s.checkProtocolSingleton(inbound, inbound.Id); err != nil {
+		return err
+	}
 
 	oldInbound, err := s.GetInbound(inbound.Id)
 	if err != nil {
@@ -133,6 +285,15 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 	oldInbound.StreamSettings = inbound.StreamSettings
 	oldInbound.Sniffing = inbound.Sniffing
 	oldInbound.Tag = fmt.Sprintf("inbound-%v", inbound.Port)
+
+	// xray dry-run with this inbound REPLACING the old row. If xray
+	// rejects the candidate (bad reality keys, etc.) we never touch the
+	// DB — the running xray process keeps the old, valid row.
+	if oldInbound.Enable {
+		if err := s.dryRunWithReplacement(oldInbound, 0); err != nil {
+			return err
+		}
+	}
 
 	db := database.GetDB()
 	return db.Save(oldInbound).Error
@@ -221,9 +382,42 @@ func (s *InboundService) SetEnableMany(ids []int, enable bool) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	// Disabling never increases attack surface for xray (fewer inbounds
+	// = strictly less to fail), so skip dry-run on the off path.
+	if !enable {
+		res := database.GetDB().Model(model.Inbound{}).
+			Where("id IN ?", ids).
+			Update("enable", false)
+		return res.RowsAffected, res.Error
+	}
+
+	// Enabling could promote a previously-disabled, broken inbound into
+	// the running config — exactly the failure mode 3x-ui has. Simulate
+	// the post-update state and dry-run xray before touching the DB.
+	all, err := s.GetAllInbounds()
+	if err != nil {
+		return 0, err
+	}
+	want := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	candidate := make([]*model.Inbound, 0, len(all))
+	for _, in := range all {
+		if want[in.Id] {
+			copy := *in
+			copy.Enable = true
+			candidate = append(candidate, &copy)
+		} else if in.Enable {
+			candidate = append(candidate, in)
+		}
+	}
+	if err := GetXrayServiceForDryRun().DryRunInbounds(candidate); err != nil {
+		return 0, err
+	}
 	res := database.GetDB().Model(model.Inbound{}).
 		Where("id IN ?", ids).
-		Update("enable", enable)
+		Update("enable", true)
 	return res.RowsAffected, res.Error
 }
 

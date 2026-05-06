@@ -108,6 +108,44 @@ func runMigrations(db *gorm.DB) error {
 				return nil
 			},
 		},
+		{
+			// Add scope column. Existing rows are admin (preserve current
+			// behavior); new rows can be created with a narrower scope so
+			// a stolen "readonly" token can't restart the panel.
+			ID: "0007_token_scope",
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(&model.APIToken{}); err != nil {
+					return err
+				}
+				return tx.Model(&model.APIToken{}).
+					Where("scope IS NULL OR scope = ''").
+					Update("scope", "admin").Error
+			},
+			Rollback: func(tx *gorm.DB) error { return nil },
+		},
+		{
+			// Add expires_at column. Defaults to 0 (never expires) for
+			// every existing row so behavior is preserved. New tokens
+			// can be issued with a finite TTL — handy for short-lived CI
+			// credentials so a leaked CI log doesn't permanently expose
+			// the cluster.
+			ID: "0008_token_expires_at",
+			Migrate: func(tx *gorm.DB) error {
+				return tx.AutoMigrate(&model.APIToken{})
+			},
+			Rollback: func(tx *gorm.DB) error { return nil },
+		},
+		{
+			// BlockRule:面板可视化的"屏蔽规则",最终合并进 Xray routing.rules
+			// 路由到 blocked 出站。和 Inbound 解耦,允许全局或按 inboundTag 作用。
+			ID: "0009_block_rules",
+			Migrate: func(tx *gorm.DB) error {
+				return tx.AutoMigrate(&model.BlockRule{})
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return tx.Migrator().DropTable(&model.BlockRule{})
+			},
+		},
 	})
 	return m.Migrate()
 }

@@ -35,6 +35,12 @@ func GetConfigPath() string {
 	return "bin/config.json"
 }
 
+// GetAccessLogPath 返回 xray access log 的路径。在线 IP 统计依赖该日志，
+// 路径相对面板进程的工作目录（systemd 下为 /usr/local/nexcore-x-ui/）。
+func GetAccessLogPath() string {
+	return "bin/access.log"
+}
+
 func GetGeositePath() string {
 	return "bin/geosite.dat"
 }
@@ -159,6 +165,10 @@ func (p *process) Start() (err error) {
 	err = os.WriteFile(configPath, data, 0o600)
 	if err != nil {
 		return common.NewErrorf("写入配置文件失败: %v", err)
+	}
+
+	if err := preflightBinary(GetBinaryPath()); err != nil {
+		return common.NewErrorf("xray binary preflight failed: %v", err)
 	}
 
 	cmd := exec.Command(GetBinaryPath(), "-c", configPath)
@@ -303,4 +313,47 @@ func (p *process) GetTraffic(reset bool) ([]*Traffic, error) {
 	}
 
 	return traffics, nil
+}
+
+// preflightBinary refuses to spawn xray when the binary is missing,
+// world-writable, or owned by a non-root user. The panel itself runs
+// as root (it has to bind privileged ports) so the threat model is
+// "another user on the box has tampered with bin/xray-* to swap a
+// coin-miner in". Catching that at start time is cheap and stops the
+// hijack from inheriting our root context. On non-unix platforms the
+// uid/permission check is a no-op since the syscall stat fields don't
+// match what we want to assert; the existence + executable check
+// still runs.
+func preflightBinary(path string) error {
+	st, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	if st.IsDir() {
+		return fmt.Errorf("%s is a directory", path)
+	}
+	mode := st.Mode()
+	if mode.Perm()&0o002 != 0 {
+		return fmt.Errorf("%s is world-writable (mode %#o) — refusing to exec", path, mode.Perm())
+	}
+	if mode&os.ModeSymlink != 0 {
+		// os.Stat follows symlinks already, but Lstat'ing first would
+		// catch a symlink dangling at a non-root-owned target. We
+		// re-stat with Lstat for the symlink-owner check below.
+		lst, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if lst.Mode().Perm()&0o002 != 0 {
+			return fmt.Errorf("%s is a world-writable symlink", path)
+		}
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+		// Owner must be root (uid 0). Anything else means a non-root
+		// user can rewrite the binary the panel will exec.
+		if sys.Uid != 0 {
+			return fmt.Errorf("%s is owned by uid %d (expected 0/root)", path, sys.Uid)
+		}
+	}
+	return nil
 }

@@ -19,13 +19,13 @@ const (
 )
 
 var (
+	// ErrMagicTokenInvalid is the only error ConsumeMagicToken returns
+	// to the HTTP layer. The expired path is folded into "invalid" so
+	// an attacker can't distinguish "this token existed once and timed
+	// out" from "this token never existed" via the response. The
+	// audit-log distinction lives inside the consume routine and the
+	// magic_tokens row's expires_at column.
 	ErrMagicTokenInvalid = errors.New("magic token invalid or already used")
-	// ErrMagicTokenExpired is preserved for internal callers that want
-	// to log "expired" specifically (e.g. audit). External callers and
-	// HTTP responses must surface the generic "invalid" error so an
-	// attacker can't distinguish "this token existed once" from "this
-	// token never existed" via the response.
-	ErrMagicTokenExpired = errors.New("magic token expired")
 )
 
 type MagicTokenService struct{}
@@ -57,10 +57,12 @@ func (s *MagicTokenService) CreateMagicToken(ttl time.Duration, note string) (*m
 	return t, nil
 }
 
-// ConsumeMagicToken validates and atomically marks the token as consumed.
-// Returns ErrMagicTokenInvalid for unknown / already-used tokens, and
-// ErrMagicTokenExpired for expired ones (the row is also marked consumed
-// so it can't be reused by retrying after expiry).
+// ConsumeMagicToken validates and atomically marks the token as
+// consumed. Always returns ErrMagicTokenInvalid on any failure mode so
+// the HTTP layer can't leak "this token existed once" vs "this token
+// never existed" via the response. The internal expiry path still
+// marks the row consumed so a reuse attempt won't reveal the prior
+// state via a different code path.
 func (s *MagicTokenService) ConsumeMagicToken(token string) error {
 	if token == "" {
 		return ErrMagicTokenInvalid
@@ -79,19 +81,17 @@ func (s *MagicTokenService) ConsumeMagicToken(token string) error {
 	}
 	now := time.Now().Unix()
 	expired := now > t.ExpiresAt
-	// Always mark consumed — including on expiry — so a reuse attempt
-	// after expiry doesn't leak whether the token was previously valid.
 	res := db.Model(&model.MagicToken{}).
 		Where("id = ? AND consumed_at = 0", t.Id).
 		Update("consumed_at", now)
 	if res.Error != nil {
 		return res.Error
 	}
-	if res.RowsAffected == 0 {
+	if res.RowsAffected == 0 || expired {
+		// expired tokens are now reported as invalid externally; the
+		// internal logger.Info call in handleMagicLogin can still
+		// distinguish if needed for audit.
 		return ErrMagicTokenInvalid
-	}
-	if expired {
-		return ErrMagicTokenExpired
 	}
 	return nil
 }

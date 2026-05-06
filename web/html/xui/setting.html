@@ -227,9 +227,13 @@
         },
         async mounted() {
             await this.getAllSetting();
+            // 1 秒一次的脏检比对在前台才有意义 — 标签页隐藏时不需要计算
+            // 保存按钮的可用状态,等切回来再继续。
             while (true) {
                 await PromiseUtil.sleep(1000);
-                this.saveBtnDisable = this.oldAllSetting.equals(this.allSetting);
+                if (!document.hidden) {
+                    this.saveBtnDisable = this.oldAllSetting.equals(this.allSetting);
+                }
             }
         },
     });

@@ -7,15 +7,87 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
 	"nexcore-x-ui/database"
 	"nexcore-x-ui/database/model"
 	"nexcore-x-ui/logger"
 	"nexcore-x-ui/util/common"
 	"nexcore-x-ui/util/random"
 	"nexcore-x-ui/util/reflect_util"
+	"nexcore-x-ui/util/secret"
 	"nexcore-x-ui/web/entity"
 )
+
+// sensitiveSettingKeys are the setting rows that get AES-GCM-wrapped at
+// rest. The wrapping is transparent to higher-level callers: getString
+// decrypts on read, setString encrypts on write. Legacy plaintext rows
+// (from before this change) decrypt as-is and rewrap on the next write.
+//
+// Tokens stored in the multi-token api_tokens table are SHA256-hashed
+// instead — they do not appear here.
+var sensitiveSettingKeys = map[string]bool{
+	"secret":     true, // gorilla/sessions HMAC key for cookie auth
+	"apiToken":   true, // legacy single-token (multi-token table is hashed)
+	"tgBotToken": true, // Telegram bot token, can post to operator chat
+}
+
+// settingCache holds an in-memory copy of every setting row keyed by
+// name. Hits are answered from the map; misses fall through to the DB
+// and populate the cache. Writes go to DB first, then update the cache.
+//
+// Why cache: hot paths (CSRF, share host validation, base path lookup
+// in the request middleware) call getString multiple times per
+// request, each round-tripping to sqlite. The audit measured this at
+// ~15-20 QPS of pointless reads for a quiet panel.
+//
+// Why this is safe with sensitive keys: the cache stores the plaintext
+// (post-Decrypt). The on-disk form is still encrypted; the cache
+// reflects what callers actually need. The cache is process-local so a
+// DB-leak attacker doesn't gain anything from the cache existing.
+var (
+	settingCacheMu sync.RWMutex
+	settingCache   = map[string]settingCacheEntry{}
+)
+
+type settingCacheEntry struct {
+	value   string
+	present bool // distinguishes "DB row exists with empty value" from "no row"
+}
+
+func settingCacheGet(key string) (settingCacheEntry, bool) {
+	settingCacheMu.RLock()
+	e, ok := settingCache[key]
+	settingCacheMu.RUnlock()
+	return e, ok
+}
+
+func settingCachePut(key string, e settingCacheEntry) {
+	settingCacheMu.Lock()
+	settingCache[key] = e
+	settingCacheMu.Unlock()
+}
+
+// settingCacheInvalidate drops a single key. Called from saveSetting
+// after a successful DB write so the next read sees the new value.
+// We invalidate (rather than overwrite with the new value) for keys
+// like "secret" where the cached value would be the plaintext but the
+// caller passed in already-encrypted data — keeps the round-trip
+// consistent with the read path.
+func settingCacheInvalidate(key string) {
+	settingCacheMu.Lock()
+	delete(settingCache, key)
+	settingCacheMu.Unlock()
+}
+
+// SettingsCacheReset clears the entire cache. Used on test setup and on
+// settings table reset (ResetSettings).
+func SettingsCacheReset() {
+	settingCacheMu.Lock()
+	settingCache = map[string]settingCacheEntry{}
+	settingCacheMu.Unlock()
+}
 
 //go:embed config.json
 var xrayTemplateConfig string
@@ -34,6 +106,11 @@ var defaultValueMap = map[string]string{
 	"tgBotChatId":        "0",
 	"tgRunTime":          "",
 	"apiToken":           "",
+	// Comma-separated allow-list for ?host=... in /inbounds/:id/links
+	// and /subscription. Empty = "any syntactically valid host accepted"
+	// (legacy behavior). Operators that want to lock down their nodes to
+	// known panel domains set this from the settings UI.
+	"subAllowedHosts": "",
 }
 
 type SettingService struct {
@@ -116,7 +193,11 @@ func (s *SettingService) GetAllSetting() (*entity.AllSetting, error) {
 
 func (s *SettingService) ResetSettings() error {
 	db := database.GetDB()
-	return db.Where("1 = 1").Delete(model.Setting{}).Error
+	if err := db.Where("1 = 1").Delete(model.Setting{}).Error; err != nil {
+		return err
+	}
+	SettingsCacheReset()
+	return nil
 }
 
 func (s *SettingService) getSetting(key string) (*model.Setting, error) {
@@ -130,24 +211,51 @@ func (s *SettingService) getSetting(key string) (*model.Setting, error) {
 }
 
 func (s *SettingService) saveSetting(key string, value string) error {
+	stored := value
+	if sensitiveSettingKeys[key] && value != "" {
+		enc, err := secret.Encrypt(value)
+		if err != nil {
+			return fmt.Errorf("encrypt setting %q: %w", key, err)
+		}
+		stored = enc
+	}
 	setting, err := s.getSetting(key)
 	db := database.GetDB()
 	if database.IsNotFound(err) {
-		return db.Create(&model.Setting{
+		if err := db.Create(&model.Setting{
 			Key:   key,
-			Value: value,
-		}).Error
+			Value: stored,
+		}).Error; err != nil {
+			return err
+		}
+		settingCacheInvalidate(key)
+		return nil
 	} else if err != nil {
 		return err
 	}
 	setting.Key = key
-	setting.Value = value
-	return db.Save(setting).Error
+	setting.Value = stored
+	if err := db.Save(setting).Error; err != nil {
+		return err
+	}
+	settingCacheInvalidate(key)
+	return nil
 }
 
 func (s *SettingService) getString(key string) (string, error) {
+	if e, ok := settingCacheGet(key); ok {
+		if !e.present {
+			// Cached "no DB row" — fall through to defaults below.
+			if v, defOk := defaultValueMap[key]; defOk {
+				return v, nil
+			}
+			return "", common.NewErrorf("key <%v> not in defaultValueMap", key)
+		}
+		return e.value, nil
+	}
 	setting, err := s.getSetting(key)
 	if database.IsNotFound(err) {
+		settingCachePut(key, settingCacheEntry{present: false})
 		value, ok := defaultValueMap[key]
 		if !ok {
 			return "", common.NewErrorf("key <%v> not in defaultValueMap", key)
@@ -156,7 +264,19 @@ func (s *SettingService) getString(key string) (string, error) {
 	} else if err != nil {
 		return "", err
 	}
-	return setting.Value, nil
+	value := setting.Value
+	if sensitiveSettingKeys[key] {
+		// Transparent: legacy plaintext rows (no envelope prefix) come
+		// back unchanged; encrypted rows decrypt to plaintext. The next
+		// setString call rewraps the legacy rows automatically.
+		dec, derr := secret.Decrypt(setting.Value)
+		if derr != nil {
+			return "", fmt.Errorf("decrypt setting %q: %w", key, derr)
+		}
+		value = dec
+	}
+	settingCachePut(key, settingCacheEntry{value: value, present: true})
+	return value, nil
 }
 
 func (s *SettingService) setString(key string, value string) error {
@@ -297,6 +417,13 @@ func (s *SettingService) EnsureAPIToken() (string, bool, error) {
 		return "", false, err
 	}
 	return token, true, nil
+}
+
+// GetSubAllowedHosts returns the comma-separated allow-list of hosts
+// accepted by the share/subscription endpoints. Empty string means
+// "any syntactically valid host" — see validateShareHost.
+func (s *SettingService) GetSubAllowedHosts() (string, error) {
+	return s.getString("subAllowedHosts")
 }
 
 func (s *SettingService) GetTimeLocation() (*time.Location, error) {
