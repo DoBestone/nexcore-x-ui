@@ -12,11 +12,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"nexcore-x-ui/config"
 )
+
+// updateCheckCacheTTL avoids hammering the GitHub API every time the dashboard
+// mounts. 5 minutes is long enough to keep panel navigation snappy and short
+// enough that a freshly-cut release shows up promptly on the next refresh.
+const updateCheckCacheTTL = 5 * time.Minute
 
 // UpdateService self-updates the panel by downloading a release tarball
 // from GitHub and replacing files in /usr/local/x-ui (or wherever the
@@ -24,7 +30,11 @@ import (
 // workflow shipped with this repo: x-ui-linux-<arch>.tar.gz containing
 // a top-level x-ui/ directory with the binary, x-ui.sh, x-ui.service,
 // bin/, and so on.
-type UpdateService struct{}
+type UpdateService struct {
+	cacheMu    sync.Mutex
+	cachedAt   time.Time
+	cachedView *UpdateCheck
+}
 
 type ReleaseInfo struct {
 	TagName     string    `json:"tag_name"`
@@ -49,6 +59,14 @@ type UpdateCheck struct {
 // the running binary version. owner/repo default to the upstream repo; see
 // repoCoordinates for env-var overrides.
 func (s *UpdateService) CheckLatest() (*UpdateCheck, error) {
+	s.cacheMu.Lock()
+	if s.cachedView != nil && time.Since(s.cachedAt) < updateCheckCacheTTL {
+		v := *s.cachedView
+		s.cacheMu.Unlock()
+		return &v, nil
+	}
+	s.cacheMu.Unlock()
+
 	owner, repo := repoCoordinates()
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 	r, err := s.fetchRelease(url)
@@ -62,6 +80,12 @@ func (s *UpdateService) CheckLatest() (*UpdateCheck, error) {
 		Release: r,
 	}
 	out.UpdateAvailable = r.TagName != "" && r.TagName != cur && r.TagName != "v"+cur && "v"+r.TagName != cur
+
+	s.cacheMu.Lock()
+	view := *out
+	s.cachedView = &view
+	s.cachedAt = time.Now()
+	s.cacheMu.Unlock()
 	return out, nil
 }
 
@@ -112,11 +136,17 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 		return nil, fmt.Errorf("extract: %w", err)
 	}
 
-	// The expected layout is `x-ui/...` inside the tarball.
-	srcDir := filepath.Join(extractedRoot, "x-ui")
+	// The expected layout is `nexcore-x-ui/...` inside the tarball produced
+	// by .github/workflows/release.yml. Fall back to the legacy `x-ui/`
+	// directory or the archive root for any forks that ship differently.
+	srcDir := filepath.Join(extractedRoot, "nexcore-x-ui")
 	if _, err := os.Stat(srcDir); err != nil {
-		// Some releases drop files at the root — try that.
-		srcDir = extractedRoot
+		legacy := filepath.Join(extractedRoot, "x-ui")
+		if _, err2 := os.Stat(legacy); err2 == nil {
+			srcDir = legacy
+		} else {
+			srcDir = extractedRoot
+		}
 	}
 
 	// Locate the running binary so we know where to install the new one.
@@ -126,8 +156,16 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 	}
 	installRoot := filepath.Dir(exe)
 
-	// Atomic swap: rename existing binary to .old, install new.
-	binSrc := filepath.Join(srcDir, "x-ui")
+	// Atomic swap: rename existing binary to .old, install new. The binary
+	// name inside the tarball matches the running executable's basename
+	// (nexcore-x-ui) — falling back to legacy "x-ui" only for old archives.
+	exeBase := filepath.Base(exe)
+	binSrc := filepath.Join(srcDir, exeBase)
+	if _, err := os.Stat(binSrc); err != nil {
+		if alt := filepath.Join(srcDir, "x-ui"); fileExists(alt) {
+			binSrc = alt
+		}
+	}
 	binDst := exe
 	binBackup := exe + ".old"
 	if _, err := os.Stat(binSrc); err != nil {
@@ -145,8 +183,18 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 
 	// Best-effort: refresh xray binary + scripts. Do not abort on failure
 	// because the main panel binary swap already succeeded.
-	for _, sub := range []string{"bin", "x-ui.sh", "x-ui.service"} {
-		_ = copyTree(filepath.Join(srcDir, sub), filepath.Join(installRoot, sub))
+	scripts := []string{"bin", exeBase + ".sh", exeBase + ".service"}
+	for _, sub := range scripts {
+		src := filepath.Join(srcDir, sub)
+		if !fileExists(src) {
+			// Legacy fallbacks for forks shipping x-ui.* names.
+			if sub == exeBase+".sh" {
+				src = filepath.Join(srcDir, "x-ui.sh")
+			} else if sub == exeBase+".service" {
+				src = filepath.Join(srcDir, "x-ui.service")
+			}
+		}
+		_ = copyTree(src, filepath.Join(installRoot, sub))
 	}
 
 	// Remove the .old backup; we trust the new binary now.
@@ -175,7 +223,9 @@ func (s *UpdateService) fetchRelease(url string) (*ReleaseInfo, error) {
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	client := &http.Client{Timeout: 20 * time.Second}
+	// Short timeout: dashboard mount fires this; we'd rather show "无法获取"
+	// than have the request hang for 20s on a flaky link to api.github.com.
+	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -193,19 +243,32 @@ func (s *UpdateService) fetchRelease(url string) (*ReleaseInfo, error) {
 }
 
 func (s *UpdateService) pickAsset(r *ReleaseInfo) string {
-	want := fmt.Sprintf("x-ui-linux-%s.tar.gz", runtime.GOARCH)
-	for _, a := range r.Assets {
-		if a.Name == want {
-			return a.BrowserDownloadURL
+	// Match the workflow's archive name first; fall back to legacy x-ui
+	// naming so forks that haven't renamed yet still self-update.
+	preferred := []string{
+		fmt.Sprintf("nexcore-x-ui-linux-%s.tar.gz", runtime.GOARCH),
+		fmt.Sprintf("x-ui-linux-%s.tar.gz", runtime.GOARCH),
+	}
+	for _, want := range preferred {
+		for _, a := range r.Assets {
+			if a.Name == want {
+				return a.BrowserDownloadURL
+			}
 		}
 	}
-	// fallback: any tarball
+	// Last resort: an arch-matching tarball under any prefix.
+	suffix := fmt.Sprintf("linux-%s.tar.gz", runtime.GOARCH)
 	for _, a := range r.Assets {
-		if strings.HasSuffix(a.Name, ".tar.gz") {
+		if strings.HasSuffix(a.Name, suffix) {
 			return a.BrowserDownloadURL
 		}
 	}
 	return ""
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // repoCoordinates returns the GitHub owner/repo used for self-update. The

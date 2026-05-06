@@ -19,14 +19,20 @@
         <a-layout-content>
             <a-spin :spinning="spinning" :delay="200" :tip="loadingTip"/>
             <transition name="list" appear>
-                <a-row v-if="updateInfo.updateAvailable">
-                    <a-card hoverable style="border-left: 4px solid #f59e0b;">
+                <a-row>
+                    <a-card hoverable
+                            :style="{ borderLeft: '4px solid ' + (updateInfo.updateAvailable ? '#f59e0b' : (updateInfo.latest ? '#10b981' : '#94a3b8')) }">
                         <a-row type="flex" align="middle" :gutter="16">
                             <a-col :flex="1">
-                                <a-icon type="cloud-download" style="color: #f59e0b; font-size: 20px; margin-right: 10px;"></a-icon>
-                                <strong>面板有新版本可用</strong>
-                                <a-tag color="orange" style="margin-left: 10px">
-                                    [[ updateInfo.current || '?' ]] → [[ updateInfo.latest ]]
+                                <a-icon :type="updateInfo.updateAvailable ? 'cloud-download' : 'check-circle'"
+                                        :style="{ color: updateInfo.updateAvailable ? '#f59e0b' : '#10b981', fontSize: '18px', marginRight: '10px' }">
+                                </a-icon>
+                                <strong v-if="updateInfo.updateAvailable">面板有新版本可用</strong>
+                                <strong v-else-if="updateInfo.latest">面板已是最新</strong>
+                                <strong v-else>面板版本</strong>
+                                <a-tag :color="updateInfo.updateAvailable ? 'orange' : 'green'" style="margin-left: 10px" class="mono">
+                                    <span v-if="updateInfo.updateAvailable">[[ updateInfo.current || '?' ]] → [[ updateInfo.latest ]]</span>
+                                    <span v-else>v[[ updateInfo.current || panelVersion ]]</span>
                                 </a-tag>
                                 <a-tooltip v-if="updateInfo.release && updateInfo.release.body" placement="bottom">
                                     <template slot="title">
@@ -34,15 +40,22 @@
                                     </template>
                                     <a-icon type="info-circle" style="color: #94a3b8; margin-left: 6px;"></a-icon>
                                 </a-tooltip>
+                                <span v-if="updateError" style="color: #b91c1c; margin-left: 10px; font-size: 12px;">
+                                    [[ updateError ]]
+                                </span>
                             </a-col>
                             <a-col>
-                                <a-popconfirm title="升级时面板会重启,需重新登录。继续?"
+                                <a-popconfirm v-if="updateInfo.updateAvailable"
+                                              title="升级时面板会重启,需重新登录。继续?"
                                               ok-text="开始升级" cancel-text="取消"
                                               @confirm="applyUpdate">
                                     <a-button type="primary" :loading="updating.applying" icon="cloud-download">
                                         在线升级到 [[ updateInfo.latest ]]
                                     </a-button>
                                 </a-popconfirm>
+                                <a-button :loading="updating.checking" @click="checkPanelUpdate(true)" icon="reload">
+                                    [[ updateInfo.latest ? '重新检查' : '检查更新' ]]
+                                </a-button>
                                 <a-button type="link" href="https://github.com/DoBestone/nexcore-x-ui/releases" target="_blank">
                                     更新日志
                                 </a-button>
@@ -312,7 +325,9 @@
             spinning: false,
             loadingTip: '加载中',
             updateInfo: { current: '', latest: '', updateAvailable: false, release: null },
-            updating: { applying: false },
+            updating: { applying: false, checking: false },
+            updateError: '',
+            panelVersion: '{{ .cur_ver }}',
         },
         methods: {
             loading(spinning, tip = '加载中') {
@@ -351,15 +366,23 @@
                     },
                 });
             },
-            // 静默版本检查 — 进入仪表盘自动跑一次,不打扰用户;有新版本才渲染顶部卡片。
-            // 网络错误/限流静默吞掉,失败不影响正常仪表盘。
-            async checkPanelUpdate() {
+            // 版本检查 — 进入仪表盘自动跑一次。后端做了 5 分钟内存缓存,
+            // 频繁切菜单不会重打 GitHub。manual=true 时按"重新检查"按钮触发。
+            async checkPanelUpdate(manual) {
+                this.updating.checking = !!manual;
+                this.updateError = '';
                 try {
                     const msg = await HttpUtil.get('/xui/api/update/check');
                     if (msg.success && msg.obj) {
                         this.updateInfo = msg.obj;
+                    } else if (manual) {
+                        this.updateError = msg.msg || '检查失败';
                     }
-                } catch (e) { /* offline / rate-limited / etc. */ }
+                } catch (e) {
+                    if (manual) this.updateError = '网络异常';
+                } finally {
+                    this.updating.checking = false;
+                }
             },
             async applyUpdate() {
                 this.updating.applying = true;
