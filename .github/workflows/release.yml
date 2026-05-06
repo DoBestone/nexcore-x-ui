@@ -49,9 +49,9 @@ jobs:
             xray: Xray-linux-s390x.zip
             xray_bin: xray-linux-s390x
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.24'
 
@@ -91,7 +91,7 @@ jobs:
           tar -czf ../nexcore-x-ui-linux-${{ matrix.arch }}.tar.gz nexcore-x-ui
 
       - name: upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: nexcore-x-ui-linux-${{ matrix.arch }}
           path: nexcore-x-ui-linux-${{ matrix.arch }}.tar.gz
@@ -101,7 +101,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true

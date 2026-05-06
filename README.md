@@ -184,11 +184,24 @@ curl -H "Authorization: Bearer $TOKEN" $BASE/system/update-check
 curl -H "Authorization: Bearer $TOKEN" -X POST $BASE/system/update-apply
 ```
 
-也可以命令行:
+也可以命令行(已安装机器):
 
 ```bash
-nexcore-x-ui update
+nexcore-x-ui update            # 升级到最新 release
+nexcore-x-ui update v1.0.0     # 升级 / 降级到指定 tag
 ```
+
+或用一键脚本(无需先装 CLI,适合自动化 / 远程批量升级):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/update.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/update.sh) v1.0.0
+```
+
+`update.sh` 与 `install.sh` 的区别:不动 systemd unit(保留你手工加的
+`Environment=` 等)、不重装系统依赖、不动 `/etc/nexcore-x-ui/`(数据库 +
+`install-info.txt` 完整保留),只:下载 tarball → 停服务 → 替换二进制 +
+脚本 + xray bin → 启服务。需要做完整重装请改用 `install.sh`。
 
 更新流程:从本仓库 GitHub Releases 拉取与本机架构匹配的 tarball → 校验 →
 原子替换二进制 → SIGHUP 重启面板。失败会回滚到 `.old` 备份。
