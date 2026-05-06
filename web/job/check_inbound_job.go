@@ -1,8 +1,8 @@
 package job
 
 import (
-	"x-ui/logger"
-	"x-ui/web/service"
+	"nexcore-x-ui/logger"
+	"nexcore-x-ui/web/service"
 )
 
 type CheckInboundJob struct {

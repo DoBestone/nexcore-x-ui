@@ -6,7 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"x-ui/web/service"
+	"nexcore-x-ui/web/service"
 )
 
 // docsFS embeds the markdown source so the panel can serve it inline. The

@@ -3,10 +3,10 @@ package service
 import (
 	"fmt"
 	"time"
-	"x-ui/database"
-	"x-ui/database/model"
-	"x-ui/util/common"
-	"x-ui/xray"
+	"nexcore-x-ui/database"
+	"nexcore-x-ui/database/model"
+	"nexcore-x-ui/util/common"
+	"nexcore-x-ui/xray"
 
 	"gorm.io/gorm"
 )

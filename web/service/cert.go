@@ -33,7 +33,7 @@ type CertEntry struct {
 // tests can use a temp dir; production always uses /root/cert (matching the
 // path the bundled acme.sh integration installs into).
 func (s *CertService) CertDir() string {
-	if v := os.Getenv("XUI_CERT_DIR"); v != "" {
+	if v := os.Getenv("NEXCORE_CERT_DIR"); v != "" {
 		return v
 	}
 	return certBaseDir

@@ -8,9 +8,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"x-ui/config"
-	"x-ui/logger"
-	"x-ui/web/entity"
+	"nexcore-x-ui/config"
+	"nexcore-x-ui/logger"
+	"nexcore-x-ui/web/entity"
 )
 
 // fmtSscanf is a tiny helper to parse single-int query params without

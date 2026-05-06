@@ -2,10 +2,10 @@ package service
 
 import (
 	"errors"
-	"x-ui/database"
-	"x-ui/database/model"
-	"x-ui/logger"
-	"x-ui/util/crypto"
+	"nexcore-x-ui/database"
+	"nexcore-x-ui/database/model"
+	"nexcore-x-ui/logger"
+	"nexcore-x-ui/util/crypto"
 
 	"gorm.io/gorm"
 )

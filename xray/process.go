@@ -14,7 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"x-ui/util/common"
+	"nexcore-x-ui/util/common"
 
 	"github.com/Workiva/go-datastructures/queue"
 	statsservice "github.com/xtls/xray-core/app/stats/command"

@@ -3,10 +3,10 @@ package controller
 import (
 	"net/http"
 	"time"
-	"x-ui/logger"
-	"x-ui/web/job"
-	"x-ui/web/service"
-	"x-ui/web/session"
+	"nexcore-x-ui/logger"
+	"nexcore-x-ui/web/job"
+	"nexcore-x-ui/web/service"
+	"nexcore-x-ui/web/session"
 
 	"github.com/gin-gonic/gin"
 )

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
-	"x-ui/logger"
-	"x-ui/xray"
+	"nexcore-x-ui/logger"
+	"nexcore-x-ui/xray"
 
 	"go.uber.org/atomic"
 )

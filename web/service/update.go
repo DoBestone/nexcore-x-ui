@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"x-ui/config"
+	"nexcore-x-ui/config"
 )
 
 // UpdateService self-updates the panel by downloading a release tarball
@@ -45,13 +45,13 @@ type UpdateCheck struct {
 	Release        *ReleaseInfo `json:"release"`
 }
 
-// CheckLatest queries GitHub releases. owner/repo come from env XUI_GH_OWNER /
-// XUI_GH_REPO so the binary remains repo-agnostic; install.sh sets these
+// CheckLatest queries GitHub releases. owner/repo come from env NEXCORE_GH_OWNER /
+// NEXCORE_GH_REPO so the binary remains repo-agnostic; install.sh sets these
 // when it knows the source repo, but operators can override too.
 func (s *UpdateService) CheckLatest() (*UpdateCheck, error) {
 	owner, repo := repoCoordinates()
 	if owner == "" || repo == "" {
-		return nil, errors.New("repository coordinates not configured (set XUI_GH_OWNER, XUI_GH_REPO)")
+		return nil, errors.New("repository coordinates not configured (set NEXCORE_GH_OWNER, NEXCORE_GH_REPO)")
 	}
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 	r, err := s.fetchRelease(url)
@@ -215,8 +215,8 @@ func (s *UpdateService) pickAsset(r *ReleaseInfo) string {
 }
 
 func repoCoordinates() (owner, repo string) {
-	owner = os.Getenv("XUI_GH_OWNER")
-	repo = os.Getenv("XUI_GH_REPO")
+	owner = os.Getenv("NEXCORE_GH_OWNER")
+	repo = os.Getenv("NEXCORE_GH_REPO")
 	return
 }
 

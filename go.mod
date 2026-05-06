@@ -1,4 +1,4 @@
-module x-ui
+module nexcore-x-ui
 
 go 1.26
 

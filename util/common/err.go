@@ -3,7 +3,7 @@ package common
 import (
 	"errors"
 	"fmt"
-	"x-ui/logger"
+	"nexcore-x-ui/logger"
 )
 
 var CtxDone = errors.New("context done")

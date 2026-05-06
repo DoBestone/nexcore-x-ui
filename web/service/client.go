@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"x-ui/database/model"
+	"nexcore-x-ui/database/model"
 )
 
 var (

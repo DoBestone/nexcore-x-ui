@@ -2,18 +2,22 @@
 # NexCore x-ui · install / upgrade
 #
 # Usage:
-#   bash <(curl -Ls https://raw.githubusercontent.com/<OWNER>/<REPO>/main/install.sh)
-#   bash <(curl -Ls https://raw.githubusercontent.com/<OWNER>/<REPO>/main/install.sh) v1.2.3
+#   bash <(curl -Ls https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/install.sh)
+#   bash <(curl -Ls https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/install.sh) v1.2.3
 #
 # Variables that override the defaults:
-#   GH_OWNER  GH_REPO  REPO_BRANCH  INSTALL_DIR  DATA_DIR
+#   GH_OWNER  GH_REPO  REPO_BRANCH  INSTALL_DIR  DATA_DIR  CMD_NAME
 #
-# What this script does NOT do anymore (deliberately):
+# Coexistence with original `x-ui` (vaxilu/x-ui or 3x-ui) is by design:
+# we install to /usr/local/nexcore-x-ui, store data in /etc/nexcore-x-ui,
+# and register a separate systemd unit `nexcore-x-ui.service`. None of
+# these collide with /usr/local/x-ui, /etc/x-ui or x-ui.service.
+#
+# What this script does NOT do (deliberately):
 #   - It will NOT prompt you for a username/password/port. The binary picks
 #     random values on first start; we display them at the end.
 #   - It will NOT use --no-check-certificate or other TLS shortcuts.
-#   - It will NOT bundle a Docker workflow. This panel installs as a systemd
-#     service only.
+#   - It will NOT bundle a Docker workflow. systemd only.
 
 set -eo pipefail
 
@@ -22,12 +26,13 @@ green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 
+CMD_NAME="${CMD_NAME:-nexcore-x-ui}"
 GH_OWNER="${GH_OWNER:-DoBestone}"
 GH_REPO="${GH_REPO:-nexcore-x-ui}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/x-ui}"
-DATA_DIR="${DATA_DIR:-/etc/x-ui}"
-SERVICE_FILE="/etc/systemd/system/x-ui.service"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/${CMD_NAME}}"
+DATA_DIR="${DATA_DIR:-/etc/${CMD_NAME}}"
+SERVICE_FILE="/etc/systemd/system/${CMD_NAME}.service"
 
 # ---------- preflight ----------
 
@@ -85,8 +90,8 @@ resolve_version() {
 
 download_release() {
     local version="$1"
-    local url="https://github.com/${GH_OWNER}/${GH_REPO}/releases/download/${version}/x-ui-linux-${ARCH}.tar.gz"
-    local dest="/tmp/x-ui-${version}-${ARCH}.tar.gz"
+    local url="https://github.com/${GH_OWNER}/${GH_REPO}/releases/download/${version}/nexcore-x-ui-linux-${ARCH}.tar.gz"
+    local dest="/tmp/nexcore-x-ui-${version}-${ARCH}.tar.gz"
     echo -e "${green}下载:${plain} ${url}"
     if ! curl -fSL --connect-timeout 10 -o "${dest}" "${url}"; then
         echo -e "${red}下载失败,请检查 release 是否存在${plain}" >&2
@@ -97,47 +102,47 @@ download_release() {
 
 # ---------- install ----------
 
-install_x_ui() {
+install_panel() {
     local version="$1"
     local archive="$2"
 
-    systemctl stop x-ui 2>/dev/null || true
+    systemctl stop "${CMD_NAME}" 2>/dev/null || true
 
     rm -rf "${INSTALL_DIR}"
     mkdir -p "${INSTALL_DIR}" "${DATA_DIR}"
     chmod 700 "${DATA_DIR}"
 
-    tar -xzf "${archive}" -C /tmp/
-    if [[ ! -d /tmp/x-ui ]]; then
-        echo -e "${red}压缩包内容不符合预期(缺少 x-ui/)${plain}" >&2
+    rm -rf "/tmp/${CMD_NAME}-extract"
+    mkdir -p "/tmp/${CMD_NAME}-extract"
+    tar -xzf "${archive}" -C "/tmp/${CMD_NAME}-extract/"
+    if [[ ! -d "/tmp/${CMD_NAME}-extract/${CMD_NAME}" ]]; then
+        echo -e "${red}压缩包内容不符合预期(缺少 ${CMD_NAME}/)${plain}" >&2
         exit 1
     fi
-    cp -a /tmp/x-ui/. "${INSTALL_DIR}/"
-    rm -rf /tmp/x-ui "${archive}"
+    cp -a "/tmp/${CMD_NAME}-extract/${CMD_NAME}/." "${INSTALL_DIR}/"
+    rm -rf "/tmp/${CMD_NAME}-extract" "${archive}"
 
-    chmod +x "${INSTALL_DIR}/x-ui"
+    chmod +x "${INSTALL_DIR}/${CMD_NAME}"
     [[ -d "${INSTALL_DIR}/bin" ]] && chmod +x "${INSTALL_DIR}/bin/"* 2>/dev/null || true
-    [[ -f "${INSTALL_DIR}/x-ui.sh" ]] && chmod +x "${INSTALL_DIR}/x-ui.sh"
+    [[ -f "${INSTALL_DIR}/${CMD_NAME}.sh" ]] && chmod +x "${INSTALL_DIR}/${CMD_NAME}.sh"
 
-    install -m 0755 "${INSTALL_DIR}/x-ui.sh" /usr/bin/x-ui
-    install -m 0644 "${INSTALL_DIR}/x-ui.service" "${SERVICE_FILE}"
+    install -m 0755 "${INSTALL_DIR}/${CMD_NAME}.sh" "/usr/bin/${CMD_NAME}"
+    install -m 0644 "${INSTALL_DIR}/${CMD_NAME}.service" "${SERVICE_FILE}"
 
-    # Ensure the binary knows where to keep its DB before first start so
-    # install-info.txt is created in DATA_DIR for us to grep.
-    sed -i.bak '/^Environment=XUI_DB_PATH=/d' "${SERVICE_FILE}"
-    sed -i 's|^\[Service\]|[Service]\nEnvironment=XUI_DB_PATH='"${DATA_DIR}"'/x-ui.db|' "${SERVICE_FILE}"
+    # Pin DB path so install-info.txt lands in DATA_DIR for us to grep.
+    sed -i.bak '/^Environment=NEXCORE_DB_PATH=/d' "${SERVICE_FILE}"
+    sed -i 's|^\[Service\]|[Service]\nEnvironment=NEXCORE_DB_PATH='"${DATA_DIR}/${CMD_NAME}.db"'|' "${SERVICE_FILE}"
     rm -f "${SERVICE_FILE}.bak"
 
     systemctl daemon-reload
-    systemctl enable x-ui
-    systemctl restart x-ui
+    systemctl enable "${CMD_NAME}"
+    systemctl restart "${CMD_NAME}"
 }
 
 # ---------- post-install banner ----------
 
 show_credentials() {
     local info_file="${DATA_DIR}/install-info.txt"
-    # The binary writes install-info.txt on first start; give it a moment.
     for _ in 1 2 3 4 5; do
         [[ -f "${info_file}" ]] && break
         sleep 1
@@ -150,21 +155,20 @@ show_credentials() {
         cat "${info_file}"
     else
         echo -e "${yellow}install-info.txt 未生成(也许是升级而非首次安装)${plain}"
-        echo "  - 查看现状: x-ui setting -show"
-        echo "  - 重置账号: x-ui setting -username <X> -password <Y>"
+        echo "  - 查看现状: ${CMD_NAME} setting -show"
+        echo "  - 重置账号: ${CMD_NAME} setting -username <X> -password <Y>"
     fi
     echo
     echo -e "${green}管理命令:${plain}"
-    echo "  x-ui              进入交互菜单(start / stop / log / setting / update / uninstall)"
-    echo "  systemctl status x-ui      系统服务状态"
-    echo "  journalctl -u x-ui -f      实时日志"
+    echo "  ${CMD_NAME}                   交互菜单"
+    echo "  systemctl status ${CMD_NAME}  系统服务状态"
+    echo "  journalctl -u ${CMD_NAME} -f  实时日志"
     echo
     local local_ip
     local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
     [[ -z "${local_ip}" ]] && local_ip="<server-ip>"
     local port
-    port=$(awk -F'panel port: ' 'NF>1{print $2}' "${info_file}" 2>/dev/null | head -1)
-    [[ -z "${port}" ]] && port="$(grep -oE 'panel port: [0-9]+' "${info_file}" 2>/dev/null | awk '{print $3}')"
+    port=$(grep -oE 'panel port: [0-9]+' "${info_file}" 2>/dev/null | awk '{print $3}' | head -1)
     [[ -n "${port}" ]] && echo -e "${green}打开:${plain} http://${local_ip}:${port}"
     echo
 }
@@ -176,5 +180,5 @@ install_deps
 VERSION="$(resolve_version "${1:-}")"
 echo -e "${green}版本:${plain} ${VERSION}"
 ARCHIVE="$(download_release "${VERSION}")"
-install_x_ui "${VERSION}" "${ARCHIVE}"
+install_panel "${VERSION}" "${ARCHIVE}"
 show_credentials

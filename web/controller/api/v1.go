@@ -7,9 +7,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"x-ui/database/model"
-	"x-ui/web/entity"
-	"x-ui/web/service"
+	"nexcore-x-ui/database/model"
+	"nexcore-x-ui/web/entity"
+	"nexcore-x-ui/web/service"
 )
 
 // V1Controller exposes node-control endpoints under /api/v1.

@@ -3,8 +3,8 @@ package controller
 import (
 	"github.com/gin-gonic/gin"
 	"time"
-	"x-ui/web/global"
-	"x-ui/web/service"
+	"nexcore-x-ui/web/global"
+	"nexcore-x-ui/web/service"
 )
 
 type ServerController struct {

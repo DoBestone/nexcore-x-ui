@@ -7,9 +7,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"x-ui/database"
-	"x-ui/database/model"
-	"x-ui/util/random"
+	"nexcore-x-ui/database"
+	"nexcore-x-ui/database/model"
+	"nexcore-x-ui/util/random"
 )
 
 const tokenLength = 48

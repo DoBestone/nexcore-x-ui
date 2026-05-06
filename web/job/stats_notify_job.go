@@ -7,9 +7,9 @@ import (
 
 	"time"
 
-	"x-ui/logger"
-	"x-ui/util/common"
-	"x-ui/web/service"
+	"nexcore-x-ui/logger"
+	"nexcore-x-ui/util/common"
+	"nexcore-x-ui/web/service"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )

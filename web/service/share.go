@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"x-ui/database/model"
+	"nexcore-x-ui/database/model"
 )
 
 // ShareService renders xray inbound rows into client-share URIs

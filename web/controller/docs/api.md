@@ -84,7 +84,7 @@ PATCH  /tokens/:id                               body {"name": "..."}
 POST   /tokens/:id/revoke
 DELETE /tokens/:id
 
-# Certs (under XUI_CERT_DIR or /root/cert)
+# Certs (under NEXCORE_CERT_DIR or /root/cert)
 GET    /certs
 POST   /certs                                    body {"name","cert","key"} (PEM)
 DELETE /certs/:name
@@ -168,7 +168,7 @@ Plaintext is returned **only** at create time:
 `POST /certs` validates the PEM pair via `tls.X509KeyPair` before persisting;
 invalid pairs return `cert_save_failed`. Files are stored as
 `<dir>/<name>.cer` and `<dir>/<name>.key` with mode 0600. Override the
-location with env `XUI_CERT_DIR` (default `/root/cert`).
+location with env `NEXCORE_CERT_DIR` (default `/root/cert`).
 
 ### System
 

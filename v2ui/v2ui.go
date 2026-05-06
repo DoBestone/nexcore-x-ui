@@ -2,11 +2,11 @@ package v2ui
 
 import (
 	"fmt"
-	"x-ui/config"
-	"x-ui/database"
-	"x-ui/database/model"
-	"x-ui/util/common"
-	"x-ui/web/service"
+	"nexcore-x-ui/config"
+	"nexcore-x-ui/database"
+	"nexcore-x-ui/database/model"
+	"nexcore-x-ui/util/common"
+	"nexcore-x-ui/web/service"
 )
 
 func MigrateFromV2UI(dbPath string) error {

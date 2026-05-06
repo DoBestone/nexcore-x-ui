@@ -6,8 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"x-ui/database/model"
-	"x-ui/web/service"
+	"nexcore-x-ui/database/model"
+	"nexcore-x-ui/web/service"
 )
 
 // AccessLogMiddleware records one APILog row per /api/v1 call. Skipped

@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
-	"x-ui/config"
+	"nexcore-x-ui/config"
 )
 
 var db *gorm.DB

@@ -1,0 +1,455 @@
+#!/bin/bash
+# NexCore x-ui · CLI management tool
+#
+# 设计原则:
+#   1. 命令按用途分组(service / install / creds / data / panel / advanced)
+#   2. 大动作必须 confirm,且接受 -y / --yes 跳过
+#   3. 默认输出可读;脚本调用走 --quiet / --json 时只输出关键值
+#   4. 与 vaxilu/x-ui 完全独立 — 安装路径、systemd unit、命令名都不冲突
+#
+# 用法:
+#   nexcore-x-ui              交互菜单
+#   nexcore-x-ui <command>    直接执行
+#   nexcore-x-ui help         所有命令
+#   nexcore-x-ui help <cmd>   单条命令的详情
+set -eo pipefail
+
+# ---------- defaults (env-overridable) ----------
+
+CMD_NAME="${CMD_NAME:-nexcore-x-ui}"
+GH_OWNER="${GH_OWNER:-DoBestone}"
+GH_REPO="${GH_REPO:-nexcore-x-ui}"
+DATA_DIR="${DATA_DIR:-/etc/${CMD_NAME}}"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/${CMD_NAME}}"
+SERVICE_NAME="${CMD_NAME}"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+DB_FILE="${DATA_DIR}/${CMD_NAME}.db"
+INFO_FILE="${DATA_DIR}/install-info.txt"
+
+ASSUME_YES=false
+QUIET=false
+
+# ---------- output helpers ----------
+
+if [[ -t 1 ]]; then
+    R='\033[0;31m'; G='\033[0;32m'; Y='\033[0;33m'; B='\033[0;34m'; C='\033[0;36m'; D='\033[2m'; N='\033[0m'
+else
+    R=''; G=''; Y=''; B=''; C=''; D=''; N=''
+fi
+hdr()  { ${QUIET} || echo -e "${B}── $* ──${N}"; }
+ok()   { ${QUIET} || echo -e "${G}✓${N} $*"; }
+info() { ${QUIET} || echo -e "${C}·${N} $*"; }
+warn() { ${QUIET} || echo -e "${Y}!${N} $*" >&2; }
+err()  { echo -e "${R}✗${N} $*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# ---------- preflight ----------
+
+require_root()      { [[ $EUID -eq 0 ]] || die "必须以 root 运行"; }
+require_installed() { [[ -f "${SERVICE_FILE}" ]] || die "${CMD_NAME} 未安装。运行:${CMD_NAME} install"; }
+
+confirm() {
+    local msg="$1" default="${2:-n}"
+    ${ASSUME_YES} && return 0
+    local ans
+    read -p "$(echo -e "${Y}?${N} ${msg} [y/n,默认 ${default}]: ")" ans
+    ans="${ans:-${default}}"
+    [[ "${ans}" =~ ^[yY] ]]
+}
+
+# ---------- group: service control ----------
+
+cmd_start()    { require_installed; systemctl start   "${SERVICE_NAME}"; ok "started";  cmd_status; }
+cmd_stop()     { require_installed; systemctl stop    "${SERVICE_NAME}"; ok "stopped"; }
+cmd_restart()  { require_installed; systemctl restart "${SERVICE_NAME}"; ok "restarted"; cmd_status; }
+cmd_enable()   { require_installed; systemctl enable  "${SERVICE_NAME}" >/dev/null && ok "开机自启已启用"; }
+cmd_disable()  { require_installed; systemctl disable "${SERVICE_NAME}" >/dev/null && ok "开机自启已禁用"; }
+cmd_status() {
+    require_installed
+    systemctl status "${SERVICE_NAME}" --no-pager --lines=0 | head -8 || true
+}
+
+cmd_log() {
+    require_installed
+    local n="${1:-200}"
+    journalctl -u "${SERVICE_NAME}" -n "${n}" --no-pager
+}
+
+cmd_log_tail() {
+    require_installed
+    journalctl -u "${SERVICE_NAME}" -f
+}
+
+# ---------- group: install lifecycle ----------
+
+cmd_install() {
+    info "拉取 install.sh"
+    bash <(curl -fsSL "https://raw.githubusercontent.com/${GH_OWNER}/${GH_REPO}/main/install.sh") "$@"
+}
+
+cmd_update() {
+    require_installed
+    info "在线更新到最新版本"
+    bash <(curl -fsSL "https://raw.githubusercontent.com/${GH_OWNER}/${GH_REPO}/main/install.sh") "$@"
+}
+
+cmd_uninstall() {
+    require_installed
+    confirm "卸载 ${CMD_NAME} 并删除 ${DATA_DIR}?" "n" || { info "已取消"; return; }
+    systemctl stop    "${SERVICE_NAME}" 2>/dev/null || true
+    systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
+    rm -f  "${SERVICE_FILE}" "/usr/bin/${CMD_NAME}"
+    rm -rf "${INSTALL_DIR}" "${DATA_DIR}"
+    systemctl daemon-reload
+    ok "已卸载"
+}
+
+# ---------- group: credentials ----------
+
+cmd_creds() {
+    require_installed
+    if [[ -f "${INFO_FILE}" ]]; then
+        cat "${INFO_FILE}"
+    else
+        warn "install-info.txt 不存在(可能你已经手动改过密码或删除了文件)"
+        "${INSTALL_DIR}/${CMD_NAME}" setting -show
+    fi
+}
+
+cmd_reset() {
+    require_installed
+    confirm "把账号密码 + 端口重置为新随机值?" "n" || { info "已取消"; return; }
+    systemctl stop "${SERVICE_NAME}"
+    rm -f "${INFO_FILE}"
+    if command -v sqlite3 >/dev/null 2>&1; then
+        sqlite3 "${DB_FILE}" "DELETE FROM settings WHERE key='webPort'; DELETE FROM users;" 2>/dev/null || true
+    else
+        warn "sqlite3 不存在,直接删除整库以触发首次初始化"
+        rm -f "${DB_FILE}"
+    fi
+    systemctl start "${SERVICE_NAME}"
+    sleep 2
+    [[ -f "${INFO_FILE}" ]] && cat "${INFO_FILE}"
+}
+
+cmd_passwd() {
+    # Usage: nexcore-x-ui passwd [<username>] [<password>]
+    # 任一为空时由 binary 自己拒绝。两者都为空时拒绝(避免误清账号)。
+    require_installed
+    local user="${1:-}" pass="${2:-}"
+    [[ -z "${user}" && -z "${pass}" ]] && die "用法:${CMD_NAME} passwd <username> <password>"
+    NEXCORE_USERNAME="${user}" NEXCORE_PASSWORD="${pass}" \
+        "${INSTALL_DIR}/${CMD_NAME}" setting -from-env
+    ok "credentials updated;将立即生效"
+}
+
+cmd_port() {
+    require_installed
+    local p="${1:-}"
+    if [[ -z "${p}" ]]; then
+        "${INSTALL_DIR}/${CMD_NAME}" setting -show | grep -E '^port:' | awk '{print $2}'
+        return
+    fi
+    [[ "${p}" =~ ^[0-9]+$ ]] || die "端口必须是数字"
+    confirm "把面板端口改成 ${p} 并重启?" "y" || { info "已取消"; return; }
+    "${INSTALL_DIR}/${CMD_NAME}" setting -port "${p}"
+    systemctl restart "${SERVICE_NAME}"
+    ok "端口 → ${p}"
+}
+
+# ---------- group: panel access ----------
+
+panel_port() {
+    if [[ -f "${INFO_FILE}" ]]; then
+        grep -oE 'panel port: [0-9]+' "${INFO_FILE}" | awk '{print $3}' | head -1
+    else
+        "${INSTALL_DIR}/${CMD_NAME}" setting -show 2>/dev/null | awk -F': ' '/^port:/{print $2}'
+    fi
+}
+
+local_ip() {
+    hostname -I 2>/dev/null | awk '{print $1}' | head -1
+}
+
+cmd_url() {
+    require_installed
+    local p ip
+    p="$(panel_port)"
+    ip="$(local_ip)"
+    [[ -z "${ip}" ]] && ip="<server-ip>"
+    [[ -z "${p}"  ]] && p="<port>"
+    echo "http://${ip}:${p}"
+}
+
+cmd_open() {
+    local u; u="$(cmd_url)"
+    info "${u}"
+    if   command -v xdg-open >/dev/null 2>&1; then xdg-open "${u}"
+    elif command -v open      >/dev/null 2>&1; then open      "${u}"
+    else warn "未找到 xdg-open / open;请手动复制 URL"
+    fi
+}
+
+cmd_magic() {
+    require_installed
+    local ttl="${1:-600}" note="${2:-cli}"
+    local u
+    u=$("${INSTALL_DIR}/${CMD_NAME}" magic -ttl "${ttl}" -note "${note}")
+    # binary 已经返回完整 URL,直接打印
+    if ${QUIET}; then echo "${u}"; else
+        ok "magic link (${ttl}s):"
+        echo "${u}"
+    fi
+}
+
+# ---------- group: data ----------
+
+cmd_backup() {
+    require_installed
+    local out="${1:-./${CMD_NAME}-backup-$(date +%Y%m%d-%H%M%S).tar.gz}"
+    tar -czf "${out}" -C "$(dirname "${DATA_DIR}")" "$(basename "${DATA_DIR}")"
+    ok "备份 → ${out} ($(du -h "${out}" | awk '{print $1}'))"
+}
+
+cmd_restore() {
+    require_installed
+    local in="$1"
+    [[ -f "${in}" ]] || die "找不到备份文件:${in}"
+    confirm "覆盖现有 ${DATA_DIR}?" "n" || { info "已取消"; return; }
+    systemctl stop "${SERVICE_NAME}"
+    tar -xzf "${in}" -C "$(dirname "${DATA_DIR}")"
+    systemctl start "${SERVICE_NAME}"
+    ok "已恢复"
+}
+
+cmd_db() {
+    require_installed
+    command -v sqlite3 >/dev/null 2>&1 || die "需要先安装 sqlite3 (apt install sqlite3)"
+    sqlite3 "${DB_FILE}"
+}
+
+# ---------- group: doctor ----------
+
+cmd_doctor() {
+    hdr "doctor — ${CMD_NAME} 健康检查"
+    local fail=0
+    _check() {
+        local label="$1" ok_msg="$2" fail_msg="$3"
+        if eval "$4"; then ok "${label}: ${ok_msg}"
+        else err "${label}: ${fail_msg}"; fail=$((fail+1))
+        fi
+    }
+    _check "binary"        "${INSTALL_DIR}/${CMD_NAME}"       "缺失" "[[ -x ${INSTALL_DIR}/${CMD_NAME} ]]"
+    _check "service file"  "${SERVICE_FILE}"                  "缺失" "[[ -f ${SERVICE_FILE} ]]"
+    _check "data dir"      "${DATA_DIR}"                      "缺失" "[[ -d ${DATA_DIR} ]]"
+    _check "database"      "${DB_FILE}"                       "缺失" "[[ -f ${DB_FILE} ]]"
+    _check "active"        "${SERVICE_NAME} 正在运行"          "未运行" "systemctl is-active --quiet ${SERVICE_NAME}"
+    _check "enabled"       "开机自启"                          "未启用" "systemctl is-enabled --quiet ${SERVICE_NAME}"
+
+    local p; p="$(panel_port)"
+    if [[ -n "${p}" ]] && (ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null) | grep -q ":${p} "; then
+        ok "panel port ${p} 在监听"
+    else
+        err "panel port ${p:-(unknown)} 不在监听"; fail=$((fail+1))
+    fi
+
+    if curl -fsS --max-time 3 "http://127.0.0.1:${p}/api/v1/health" >/dev/null; then
+        ok "/api/v1/health 200"
+    else
+        err "/api/v1/health 不通"; fail=$((fail+1))
+    fi
+
+    echo
+    if [[ ${fail} -eq 0 ]]; then ok "all good"; return 0
+    else err "${fail} 项问题;${C}journalctl -u ${SERVICE_NAME} -n 200${N} 查看日志"; return 1
+    fi
+}
+
+# ---------- group: advanced ----------
+
+cmd_setting() {
+    require_installed
+    "${INSTALL_DIR}/${CMD_NAME}" setting "$@"
+}
+
+cmd_exec() {
+    require_installed
+    "${INSTALL_DIR}/${CMD_NAME}" "$@"
+}
+
+cmd_version() {
+    if [[ -x "${INSTALL_DIR}/${CMD_NAME}" ]]; then
+        "${INSTALL_DIR}/${CMD_NAME}" -v
+    else
+        echo "(未安装 binary)"
+    fi
+}
+
+# ---------- help ----------
+
+show_help() {
+    cat <<HELP
+${C}${CMD_NAME}${N} — NexCore x-ui CLI
+
+${B}service${N}
+  start | stop | restart            启停 systemd 服务
+  status                            状态摘要
+  enable | disable                  开机自启
+  log [N]                           最近 N(默认 200)行 journal 日志
+  log-tail                          实时跟踪日志
+
+${B}install${N}
+  install [tag]                     安装 / 升级到指定 tag(默认 latest)
+  update [tag]                      同 install,语义更清晰
+  uninstall                         卸载并清理 ${DATA_DIR}
+
+${B}credentials${N}
+  creds | info                      显示 install-info.txt
+  reset                             重置账号密码 + 端口为新随机值
+  passwd <user> <pass>              改账号密码
+  port [N]                          显示或设置面板端口
+
+${B}panel access${N}
+  url                               打印面板访问 URL
+  open                              在本机浏览器打开
+  magic [ttl=600] [note=cli]        生成一次性 magic-link 登录 URL
+
+${B}data${N}
+  backup [out.tar.gz]               把 ${DATA_DIR} 打包(默认放当前目录)
+  restore <in.tar.gz>               从 tarball 恢复
+  db                                打开 sqlite shell
+
+${B}health${N}
+  doctor                            健康检查(binary/service/port/HTTP)
+  version                           运行时版本
+
+${B}advanced${N}
+  setting -<flag>                   binary 内置 setting 子命令
+  exec <args...>                    binary 直通
+
+${D}全局选项: -y/--yes 跳过 confirm · -q/--quiet 简化输出${N}
+${D}env: GH_OWNER GH_REPO INSTALL_DIR DATA_DIR — 覆盖默认路径${N}
+HELP
+}
+
+# ---------- argument parsing ----------
+
+# extract -y/--yes / -q/--quiet anywhere on the command line
+ARGS=()
+for a in "$@"; do
+    case "$a" in
+        -y|--yes)   ASSUME_YES=true ;;
+        -q|--quiet) QUIET=true ;;
+        *) ARGS+=("$a") ;;
+    esac
+done
+set -- "${ARGS[@]}"
+
+# ---------- 交互菜单(无参数时) ----------
+
+show_menu() {
+    echo
+    echo -e "${C}NexCore x-ui · 管理菜单${N}"
+    cat <<MENU
+
+  ${B}1.${N} 安装/更新       ${B}9.${N}  开机自启 / 禁用
+  ${B}2.${N} 卸载             ${B}10.${N} 显示登录信息
+  ${B}3.${N} 启动             ${B}11.${N} 重置账号密码+端口
+  ${B}4.${N} 停止             ${B}12.${N} 生成 magic 登录链接
+  ${B}5.${N} 重启             ${B}13.${N} 健康检查 (doctor)
+  ${B}6.${N} 状态             ${B}14.${N} 备份 / 恢复
+  ${B}7.${N} 最近日志         ${B}15.${N} setting 直通
+  ${B}8.${N} 实时日志         ${B}0.${N}  退出
+MENU
+    read -p "选择: " ch
+    case "$ch" in
+        0) exit 0 ;;
+        1) cmd_install ;;
+        2) cmd_uninstall ;;
+        3) cmd_start ;;
+        4) cmd_stop ;;
+        5) cmd_restart ;;
+        6) cmd_status ;;
+        7) cmd_log ;;
+        8) cmd_log_tail ;;
+        9)
+            read -p "  enable / disable? " sub
+            [[ "$sub" == "enable"  ]] && cmd_enable
+            [[ "$sub" == "disable" ]] && cmd_disable
+            ;;
+        10) cmd_creds ;;
+        11) cmd_reset ;;
+        12)
+            read -p "  ttl 秒数 [600]: " ttl
+            cmd_magic "${ttl:-600}" "interactive"
+            ;;
+        13) cmd_doctor ;;
+        14)
+            read -p "  backup / restore? " sub
+            if [[ "$sub" == "backup" ]]; then cmd_backup
+            else read -p "  备份文件路径: " bp; cmd_restore "$bp"
+            fi
+            ;;
+        15) read -p "  setting flags: " flags; cmd_setting $flags ;;
+        *) warn "未知选项";;
+    esac
+}
+
+# ---------- entry ----------
+
+require_root
+
+if [[ ${#ARGS[@]} -eq 0 ]]; then
+    show_menu
+    exit 0
+fi
+
+case "$1" in
+    # service
+    start)        cmd_start ;;
+    stop)         cmd_stop ;;
+    restart)      cmd_restart ;;
+    status)       cmd_status ;;
+    enable)       cmd_enable ;;
+    disable)      cmd_disable ;;
+    log)          shift; cmd_log "$@" ;;
+    log-tail|tail) cmd_log_tail ;;
+
+    # install
+    install)      shift; cmd_install   "$@" ;;
+    update)       shift; cmd_update    "$@" ;;
+    uninstall)    cmd_uninstall ;;
+
+    # credentials
+    creds|info|show) cmd_creds ;;
+    reset)        cmd_reset ;;
+    passwd|password) shift; cmd_passwd "$@" ;;
+    port)         shift; cmd_port "$@" ;;
+
+    # panel access
+    url)          cmd_url ;;
+    open)         cmd_open ;;
+    magic)        shift; cmd_magic "$@" ;;
+
+    # data
+    backup)       shift; cmd_backup "$@" ;;
+    restore)      shift; cmd_restore "$@" ;;
+    db)           cmd_db ;;
+
+    # health
+    doctor)       cmd_doctor ;;
+    version|-v|--version) cmd_version ;;
+
+    # advanced
+    setting)      shift; cmd_setting "$@" ;;
+    exec)         shift; cmd_exec "$@" ;;
+
+    -h|--help|help)
+        if [[ -n "$2" ]]; then
+            grep -A 2 "^[[:space:]]*$2" <<<"$(show_help)" | head -5
+        else
+            show_help
+        fi
+        ;;
+    *) die "未知命令: $1 — 看 ${CMD_NAME} help" ;;
+esac

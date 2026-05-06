@@ -34,7 +34,7 @@ func GetLogLevel() LogLevel {
 	if IsDebug() {
 		return Debug
 	}
-	logLevel := os.Getenv("XUI_LOG_LEVEL")
+	logLevel := os.Getenv("NEXCORE_LOG_LEVEL")
 	if logLevel == "" {
 		return Info
 	}
@@ -42,11 +42,11 @@ func GetLogLevel() LogLevel {
 }
 
 func IsDebug() bool {
-	return os.Getenv("XUI_DEBUG") == "true"
+	return os.Getenv("NEXCORE_DEBUG") == "true"
 }
 
 func GetDBPath() string {
-	if p := os.Getenv("XUI_DB_PATH"); p != "" {
+	if p := os.Getenv("NEXCORE_DB_PATH"); p != "" {
 		return p
 	}
 	return fmt.Sprintf("/etc/%s/%s.db", GetName(), GetName())

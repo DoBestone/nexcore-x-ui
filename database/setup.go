@@ -10,9 +10,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"x-ui/database/model"
-	"x-ui/util/crypto"
-	"x-ui/util/random"
+	"nexcore-x-ui/database/model"
+	"nexcore-x-ui/util/crypto"
+	"nexcore-x-ui/util/random"
 )
 
 const installInfoFilename = "install-info.txt"

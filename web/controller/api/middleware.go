@@ -8,7 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"x-ui/web/service"
+	"nexcore-x-ui/web/service"
 )
 
 const (

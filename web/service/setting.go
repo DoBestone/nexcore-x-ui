@@ -8,13 +8,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"x-ui/database"
-	"x-ui/database/model"
-	"x-ui/logger"
-	"x-ui/util/common"
-	"x-ui/util/random"
-	"x-ui/util/reflect_util"
-	"x-ui/web/entity"
+	"nexcore-x-ui/database"
+	"nexcore-x-ui/database/model"
+	"nexcore-x-ui/logger"
+	"nexcore-x-ui/util/common"
+	"nexcore-x-ui/util/random"
+	"nexcore-x-ui/util/reflect_util"
+	"nexcore-x-ui/web/entity"
 )
 
 //go:embed config.json

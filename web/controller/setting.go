@@ -7,10 +7,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"x-ui/util/crypto"
-	"x-ui/web/entity"
-	"x-ui/web/service"
-	"x-ui/web/session"
+	"nexcore-x-ui/util/crypto"
+	"nexcore-x-ui/web/entity"
+	"nexcore-x-ui/web/service"
+	"nexcore-x-ui/web/session"
 )
 
 type updateUserForm struct {

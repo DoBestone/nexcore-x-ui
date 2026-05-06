@@ -17,9 +17,9 @@ import (
 	"os"
 	"runtime"
 	"time"
-	"x-ui/logger"
-	"x-ui/util/sys"
-	"x-ui/xray"
+	"nexcore-x-ui/logger"
+	"nexcore-x-ui/util/sys"
+	"nexcore-x-ui/xray"
 )
 
 type ProcessState string

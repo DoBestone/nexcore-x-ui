@@ -4,7 +4,7 @@ import (
 	"github.com/go-gormigrate/gormigrate/v2"
 	"gorm.io/gorm"
 
-	"x-ui/database/model"
+	"nexcore-x-ui/database/model"
 )
 
 // migrations is the source of truth for schema evolution. Each entry has a

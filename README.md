@@ -36,27 +36,65 @@ password:   k2Lp9Qr7sW5nMx8t
 打开: http://1.2.3.4:38421
 ```
 
-凭据同时会写到 `/etc/x-ui/install-info.txt`(权限 0600),**记下后建议删除**。
+凭据同时会写到 `/etc/nexcore-x-ui/install-info.txt`(权限 0600),**记下后建议删除**。
 
 支持的 CPU 架构:`amd64` / `arm64` / `armv7` / `s390x`(linux + systemd)。
 
 ---
 
-## 管理命令
+## 管理命令(`nexcore-x-ui` CLI)
 
+按用途分组,大动作前都会确认(`-y` 跳过)。
+
+### 服务控制
 ```text
-x-ui                 进入交互菜单
-x-ui install [tag]   安装 / 升级到最新或指定版本
-x-ui update          等价于 install
-x-ui start|stop|restart|status
-x-ui log             查看最近 200 行日志
-x-ui log-tail        实时跟踪日志
-x-ui enable|disable  开机自启
-x-ui info            显示当前的端口/账号/密码(install-info.txt)
-x-ui reset           将账号密码 + 端口重置为新一组随机值
-x-ui setting -flags  通用设置(详见 -h)
-x-ui uninstall       卸载(连数据一起删)
+nexcore-x-ui                       进入交互菜单
+nexcore-x-ui start|stop|restart    启停服务
+nexcore-x-ui status                状态摘要
+nexcore-x-ui enable|disable        开机自启
+nexcore-x-ui log [N]               最近 N 行(默认 200)
+nexcore-x-ui log-tail              实时跟踪
 ```
+
+### 安装生命周期
+```text
+nexcore-x-ui install [tag]         安装 / 升级
+nexcore-x-ui update [tag]          等价于 install
+nexcore-x-ui uninstall             卸载(连数据一起删)
+```
+
+### 凭据 / 端口
+```text
+nexcore-x-ui creds | info          显示 install-info.txt
+nexcore-x-ui reset                 重置账号密码 + 端口为新随机值
+nexcore-x-ui passwd <user> <pass>  改账号密码
+nexcore-x-ui port [N]              查看 / 设置面板端口
+```
+
+### 面板访问
+```text
+nexcore-x-ui url                   打印面板 URL(http://<lan-ip>:<port>)
+nexcore-x-ui open                  在本机浏览器打开
+nexcore-x-ui magic [ttl=600]       生成一次性 magic-link 登录 URL
+```
+
+### 数据
+```text
+nexcore-x-ui backup [out.tar.gz]   把 /etc/nexcore-x-ui 打成 tarball
+nexcore-x-ui restore <in.tar.gz>   从 tarball 恢复
+nexcore-x-ui db                    打开 sqlite shell
+```
+
+### 健康检查 / 高级
+```text
+nexcore-x-ui doctor                自检:binary / service / 端口 / /health
+nexcore-x-ui version               版本号
+nexcore-x-ui setting -<flag>...    binary 内置 setting 子命令
+nexcore-x-ui exec <args>           binary 直通
+```
+
+全局选项:`-y/--yes` 跳过 confirm · `-q/--quiet` 简化输出。
+完整命令清单:`nexcore-x-ui help`。
 
 ---
 
@@ -111,7 +149,7 @@ https://node.example.com/panel-login/aBc...XYZ
 | Access logs | `GET\|DELETE /access-logs` |
 
 认证:`Authorization: Bearer <token>` / `X-API-Token: <token>` / `?api_token=...`。
-Token 通过面板创建(API 控制台)或在节点上 `x-ui` 命令行获取。
+Token 通过面板创建(API 控制台)或在节点上 `nexcore-x-ui` 命令行获取。
 
 业务系统接入示例:
 
@@ -149,14 +187,15 @@ curl -H "Authorization: Bearer $TOKEN" -X POST $BASE/system/update-apply
 也可以命令行:
 
 ```bash
-x-ui update
+nexcore-x-ui update
 ```
 
 更新流程:从本仓库 GitHub Releases 拉取与本机架构匹配的 tarball → 校验 →
 原子替换二进制 → SIGHUP 重启面板。失败会回滚到 `.old` 备份。
 
-> 自更新需要二进制能从 GitHub 拉到。在隔离网络环境可以 `x-ui install <tag>`
-> 手动指定版本,或者通过环境变量 `XUI_GH_OWNER` / `XUI_GH_REPO` 指向自有镜像。
+> 自更新需要二进制能从 GitHub 拉到。在隔离网络环境可以
+> `nexcore-x-ui install <tag>` 手动指定版本,或通过环境变量
+> `NEXCORE_GH_OWNER` / `NEXCORE_GH_REPO` 指向自有镜像。
 
 ---
 
@@ -164,24 +203,29 @@ x-ui update
 
 | 路径 | 内容 |
 |---|---|
-| `/usr/local/x-ui/x-ui` | 主二进制 |
-| `/usr/local/x-ui/bin/xray-linux-<arch>` | xray-core 子进程 |
-| `/usr/local/x-ui/bin/geoip.dat` / `geosite.dat` | 路由数据 |
-| `/usr/local/x-ui/bin/config.json` | 由面板生成的运行态 xray 配置(0600) |
-| `/etc/x-ui/x-ui.db` | sqlite 数据库 |
-| `/etc/x-ui/install-info.txt` | 首次安装的端口/账号/密码 |
-| `/etc/systemd/system/x-ui.service` | systemd 单元(已加 hardening) |
-| `/usr/bin/x-ui` | 管理脚本(指向 `/usr/local/x-ui/x-ui.sh`) |
+| `/usr/local/nexcore-x-ui/nexcore-x-ui` | 主二进制 |
+| `/usr/local/nexcore-x-ui/bin/xray-linux-<arch>` | xray-core 子进程 |
+| `/usr/local/nexcore-x-ui/bin/geoip.dat` / `geosite.dat` | 路由数据 |
+| `/usr/local/nexcore-x-ui/bin/config.json` | 由面板生成的运行态 xray 配置(0600) |
+| `/etc/nexcore-x-ui/nexcore-x-ui.db` | sqlite 数据库 |
+| `/etc/nexcore-x-ui/install-info.txt` | 首次安装的端口/账号/密码 |
+| `/etc/systemd/system/nexcore-x-ui.service` | systemd 单元(已加 hardening) |
+| `/usr/bin/nexcore-x-ui` | 管理 CLI(指向 `/usr/local/nexcore-x-ui/nexcore-x-ui.sh`) |
+
+> **与原版 vaxilu/x-ui 共存**:本项目所有路径与服务名都用 `nexcore-x-ui`
+> 前缀。可以在同一台服务器上同时跑 `x-ui`(原版,`/etc/x-ui` + `x-ui.service`)
+> 与 `nexcore-x-ui`(本项目,`/etc/nexcore-x-ui` + `nexcore-x-ui.service`),
+> 数据库、systemd unit、CLI 名都不冲突。两套面板需各自占用不同端口。
 
 环境变量:
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `XUI_DB_PATH` | `/etc/x-ui/x-ui.db` | 数据库路径 |
-| `XUI_DEBUG` | `false` | 调试模式 + 从磁盘热加载模板 |
-| `XUI_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
-| `XUI_GH_OWNER` / `XUI_GH_REPO` | `DoBestone` / `nexcore-x-ui` | 自更新源 |
-| `XUI_CERT_DIR` | `/root/cert` | 证书目录 |
+| `NEXCORE_DB_PATH` | `/etc/nexcore-x-ui/nexcore-x-ui.db` | 数据库路径 |
+| `NEXCORE_DEBUG` | `false` | 调试模式 + 从磁盘热加载模板 |
+| `NEXCORE_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+| `NEXCORE_GH_OWNER` / `NEXCORE_GH_REPO` | `DoBestone` / `nexcore-x-ui` | 自更新源 |
+| `NEXCORE_CERT_DIR` | `/root/cert` | 证书目录 |
 
 ---
 
@@ -190,13 +234,13 @@ x-ui update
 ```bash
 git clone https://github.com/DoBestone/nexcore-x-ui.git
 cd nexcore-x-ui
-go build -o x-ui
+go build -o nexcore-x-ui
 
 # 本地跑(数据库放 /tmp,不污染 /etc)
-XUI_DB_PATH=/tmp/x-ui.db ./x-ui run
+NEXCORE_DB_PATH=/tmp/nexcore.db ./nexcore-x-ui run
 ```
 
-热重载(模板/CSS):`XUI_DEBUG=true XUI_DB_PATH=/tmp/x-ui.db ./x-ui run` —
+热重载:`NEXCORE_DEBUG=true NEXCORE_DB_PATH=/tmp/nexcore.db ./nexcore-x-ui run` —
 模板 / 前端资源直接从磁盘读,改完刷新浏览器即可。
 
 测试在线编译:打 tag(`git tag v0.1.0 && git push --tags`)→ GitHub Actions

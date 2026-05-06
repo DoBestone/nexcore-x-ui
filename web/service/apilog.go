@@ -6,8 +6,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"x-ui/database"
-	"x-ui/database/model"
+	"nexcore-x-ui/database"
+	"nexcore-x-ui/database/model"
 )
 
 const apiLogGCAfter = 14 * 24 * time.Hour

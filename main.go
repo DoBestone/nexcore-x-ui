@@ -4,17 +4,20 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 	_ "unsafe"
-	"x-ui/config"
-	"x-ui/database"
-	"x-ui/logger"
-	"x-ui/v2ui"
-	"x-ui/web"
-	"x-ui/web/global"
-	"x-ui/web/service"
+
+	"nexcore-x-ui/config"
+	"nexcore-x-ui/database"
+	"nexcore-x-ui/logger"
+	"nexcore-x-ui/v2ui"
+	"nexcore-x-ui/web"
+	"nexcore-x-ui/web/global"
+	"nexcore-x-ui/web/service"
 )
 
 func runWebServer() {
@@ -230,6 +233,14 @@ func main() {
 	var dbPath string
 	v2uiCmd.StringVar(&dbPath, "db", "/etc/v2-ui/v2-ui.db", "set v2-ui db file path")
 
+	magicCmd := flag.NewFlagSet("magic", flag.ExitOnError)
+	var magicTTL int
+	var magicNote string
+	var magicHost string
+	magicCmd.IntVar(&magicTTL, "ttl", 600, "magic link lifetime in seconds (60..86400)")
+	magicCmd.StringVar(&magicNote, "note", "", "audit note (free-form)")
+	magicCmd.StringVar(&magicHost, "host", "", "panel host[:port] for the URL (auto-detect if empty)")
+
 	settingCmd := flag.NewFlagSet("setting", flag.ExitOnError)
 	var port int
 	var username string
@@ -246,7 +257,7 @@ func main() {
 	settingCmd.IntVar(&port, "port", 0, "set panel port")
 	settingCmd.StringVar(&username, "username", "", "set login username")
 	settingCmd.StringVar(&password, "password", "", "set login password (avoid: visible in ps; use -from-env)")
-	settingCmd.BoolVar(&fromEnv, "from-env", false, "read username/password from XUI_USERNAME/XUI_PASSWORD env vars")
+	settingCmd.BoolVar(&fromEnv, "from-env", false, "read username/password from NEXCORE_USERNAME/NEXCORE_PASSWORD env vars")
 	settingCmd.StringVar(&tgbottoken, "tgbottoken", "", "set telegrame bot token")
 	settingCmd.StringVar(&tgbotRuntime, "tgbotRuntime", "", "set telegrame bot cron time")
 	settingCmd.IntVar(&tgbotchatid, "tgbotchatid", 0, "set telegrame bot chat id")
@@ -296,13 +307,13 @@ func main() {
 			resetSetting()
 		} else {
 			if fromEnv {
-				if envUser := os.Getenv("XUI_USERNAME"); envUser != "" {
+				if envUser := os.Getenv("NEXCORE_USERNAME"); envUser != "" {
 					username = envUser
 				}
-				if envPwd := os.Getenv("XUI_PASSWORD"); envPwd != "" {
+				if envPwd := os.Getenv("NEXCORE_PASSWORD"); envPwd != "" {
 					password = envPwd
 				}
-				_ = os.Unsetenv("XUI_PASSWORD")
+				_ = os.Unsetenv("NEXCORE_PASSWORD")
 			}
 			updateSetting(port, username, password)
 		}
@@ -312,13 +323,79 @@ func main() {
 		if (tgbottoken != "") || (tgbotchatid != 0) || (tgbotRuntime != "") {
 			updateTgbotSetting(tgbottoken, tgbotchatid, tgbotRuntime)
 		}
+	case "magic":
+		if err := magicCmd.Parse(os.Args[2:]); err != nil {
+			fmt.Println(err)
+			return
+		}
+		mintMagicLink(magicTTL, magicNote, magicHost)
 	default:
-		fmt.Println("except 'run' or 'v2-ui' or 'setting' subcommands")
+		fmt.Println("expected one of: run, v2-ui, setting, magic, -v")
 		fmt.Println()
 		runCmd.Usage()
 		fmt.Println()
 		v2uiCmd.Usage()
 		fmt.Println()
 		settingCmd.Usage()
+		fmt.Println()
+		magicCmd.Usage()
 	}
+}
+
+// mintMagicLink is a CLI helper that initialises the database and inserts a
+// one-shot login token, then prints a ready-to-paste URL. Operators use this
+// to remotely log themselves into the panel without typing credentials.
+func mintMagicLink(ttlSeconds int, note, host string) {
+	if err := database.InitDB(config.GetDBPath()); err != nil {
+		fmt.Println("open db failed:", err)
+		os.Exit(1)
+	}
+	svc := service.MagicTokenService{}
+	t, err := svc.CreateMagicToken(time.Duration(ttlSeconds)*time.Second, note)
+	if err != nil {
+		fmt.Println("mint magic token failed:", err)
+		os.Exit(1)
+	}
+	if host == "" {
+		host = autoDetectHost()
+	}
+	scheme := "http"
+	url := fmt.Sprintf("%s://%s/panel-login/%s", scheme, host, t.Token)
+	fmt.Println(url)
+}
+
+func autoDetectHost() string {
+	settingService := service.SettingService{}
+	port, err := settingService.GetPort()
+	if err != nil || port == 0 {
+		port = 54321
+	}
+	listen, _ := settingService.GetListen()
+	if listen == "" {
+		// best-effort: pick first non-loopback IPv4
+		listen = firstNonLoopbackIP()
+		if listen == "" {
+			listen = "127.0.0.1"
+		}
+	}
+	return fmt.Sprintf("%s:%d", listen, port)
+}
+
+func firstNonLoopbackIP() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+				return ipnet.IP.String()
+			}
+		}
+	}
+	return ""
 }

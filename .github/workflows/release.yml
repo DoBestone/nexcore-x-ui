@@ -2,9 +2,9 @@ name: release
 
 # Triggered by pushing a tag like v1.2.3 (or running manually). The job
 # cross-compiles linux binaries for the architectures we ship, packages
-# each into x-ui-linux-<arch>.tar.gz alongside the matching xray-core
-# binary + geoip/geosite, and uploads them all to the github release
-# whose name matches the tag.
+# each into nexcore-x-ui-linux-<arch>.tar.gz alongside the matching
+# xray-core binary + geoip/geosite, and uploads them all to the github
+# release whose name matches the tag.
 
 on:
   push:
@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # required for softprops/action-gh-release
+  contents: write
 
 jobs:
   build:
@@ -60,7 +60,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y ${{ matrix.apt }} unzip wget
 
-      - name: build x-ui binary
+      - name: build panel binary
         env:
           CGO_ENABLED: 1
           GOOS: linux
@@ -68,14 +68,14 @@ jobs:
           GOARM: ${{ matrix.goarm }}
           CC: ${{ matrix.cc }}
         run: |
-          go build -trimpath -ldflags '-s -w -X main.buildTag=${{ github.ref_name }}' -o x-ui-bin main.go
-          mkdir -p stage/x-ui/bin
-          cp x-ui-bin           stage/x-ui/x-ui
-          cp x-ui.service       stage/x-ui/x-ui.service
-          cp x-ui.sh            stage/x-ui/x-ui.sh
+          go build -trimpath -ldflags '-s -w -X main.buildTag=${{ github.ref_name }}' -o panel-bin main.go
+          mkdir -p stage/nexcore-x-ui/bin
+          cp panel-bin              stage/nexcore-x-ui/nexcore-x-ui
+          cp nexcore-x-ui.service   stage/nexcore-x-ui/nexcore-x-ui.service
+          cp nexcore-x-ui.sh        stage/nexcore-x-ui/nexcore-x-ui.sh
 
       - name: bundle xray + geo data
-        working-directory: stage/x-ui/bin
+        working-directory: stage/nexcore-x-ui/bin
         run: |
           wget -q https://github.com/XTLS/Xray-core/releases/latest/download/${{ matrix.xray }}
           unzip -q ${{ matrix.xray }}
@@ -88,13 +88,13 @@ jobs:
       - name: package
         run: |
           cd stage
-          tar -czf ../x-ui-linux-${{ matrix.arch }}.tar.gz x-ui
+          tar -czf ../nexcore-x-ui-linux-${{ matrix.arch }}.tar.gz nexcore-x-ui
 
       - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: x-ui-linux-${{ matrix.arch }}
-          path: x-ui-linux-${{ matrix.arch }}.tar.gz
+          name: nexcore-x-ui-linux-${{ matrix.arch }}
+          path: nexcore-x-ui-linux-${{ matrix.arch }}.tar.gz
 
   publish:
     name: publish release

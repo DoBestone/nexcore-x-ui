@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"strconv"
-	"x-ui/database/model"
-	"x-ui/logger"
-	"x-ui/web/global"
-	"x-ui/web/service"
-	"x-ui/web/session"
+	"nexcore-x-ui/database/model"
+	"nexcore-x-ui/logger"
+	"nexcore-x-ui/web/global"
+	"nexcore-x-ui/web/service"
+	"nexcore-x-ui/web/session"
 )
 
 type InboundController struct {
