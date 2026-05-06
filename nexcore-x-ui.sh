@@ -32,15 +32,15 @@ QUIET=false
 # ---------- output helpers ----------
 
 if [[ -t 1 ]]; then
-    R='\033[0;31m'; G='\033[0;32m'; Y='\033[0;33m'; B='\033[0;34m'; C='\033[0;36m'; D='\033[2m'; N='\033[0m'
+    R=$'\033[0;31m'; G=$'\033[0;32m'; Y=$'\033[0;33m'; B=$'\033[0;34m'; C=$'\033[0;36m'; D=$'\033[2m'; N=$'\033[0m'
 else
     R=''; G=''; Y=''; B=''; C=''; D=''; N=''
 fi
-hdr()  { ${QUIET} || echo -e "${B}── $* ──${N}"; }
-ok()   { ${QUIET} || echo -e "${G}✓${N} $*"; }
-info() { ${QUIET} || echo -e "${C}·${N} $*"; }
-warn() { ${QUIET} || echo -e "${Y}!${N} $*" >&2; }
-err()  { echo -e "${R}✗${N} $*" >&2; }
+hdr()  { ${QUIET} || echo "${B}── $* ──${N}"; }
+ok()   { ${QUIET} || echo "${G}✓${N} $*"; }
+info() { ${QUIET} || echo "${C}·${N} $*"; }
+warn() { ${QUIET} || echo "${Y}!${N} $*" >&2; }
+err()  { echo "${R}✗${N} $*" >&2; }
 die()  { err "$*"; exit 1; }
 
 # ---------- preflight ----------
@@ -52,7 +52,7 @@ confirm() {
     local msg="$1" default="${2:-n}"
     ${ASSUME_YES} && return 0
     local ans
-    read -p "$(echo -e "${Y}?${N} ${msg} [y/n,默认 ${default}]: ")" ans
+    read -p "${Y}?${N} ${msg} [y/n,默认 ${default}]: " ans
     ans="${ans:-${default}}"
     [[ "${ans}" =~ ^[yY] ]]
 }
@@ -423,7 +423,7 @@ set -- "${ARGS[@]}"
 
 show_menu() {
     echo
-    echo -e "${C}NexCore x-ui · 管理菜单${N}"
+    echo "${C}NexCore x-ui · 管理菜单${N}"
     cat <<MENU
 
   ${B}1.${N} 安装/更新       ${B}9.${N}  开机自启 / 禁用
