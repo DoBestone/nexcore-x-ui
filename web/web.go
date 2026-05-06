@@ -450,11 +450,28 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	engine.Use(func(c *gin.Context) {
 		c.Set("base_path", basePath)
 	})
+	// Static asset cache headers. Two layers:
+	//   1. Cache-Control: max-age=1y — browsers cache aggressively.
+	//   2. ETag: W/"<version>" — when the binary version bumps, the
+	//      stale-cache resources revalidate and pull the new bytes;
+	//      same-version revalidations short-circuit to 304 with no body.
+	// Both together: zero-body re-fetch on Ctrl+Shift+R against an
+	// up-to-date binary, and hard cache-bust on every release.
+	assetEtag := `W/"` + config.GetVersion() + `"`
 	engine.Use(func(c *gin.Context) {
 		uri := c.Request.RequestURI
-		if strings.HasPrefix(uri, assetsBasePath) {
-			c.Header("Cache-Control", "max-age=31536000")
+		if !strings.HasPrefix(uri, assetsBasePath) {
+			c.Next()
+			return
 		}
+		c.Header("Cache-Control", "max-age=31536000")
+		c.Header("ETag", assetEtag)
+		if match := c.GetHeader("If-None-Match"); match != "" && match == assetEtag {
+			c.Status(http.StatusNotModified)
+			c.Abort()
+			return
+		}
+		c.Next()
 	})
 	err = s.initI18n(engine)
 	if err != nil {

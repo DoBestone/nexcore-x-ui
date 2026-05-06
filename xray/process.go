@@ -27,7 +27,16 @@ func GetBinaryName() string {
 	return fmt.Sprintf("xray-%s-%s", runtime.GOOS, runtime.GOARCH)
 }
 
+// GetBinaryPath returns the path to the xray binary. The default lives next
+// to the panel binary (bin/xray-<os>-<arch>), but tests and unusual deploys
+// can override via NEXCORE_XRAY_BIN — e.g. test code can point it at
+// /usr/bin/true to simulate "every config validates" or /usr/bin/false for
+// "every config rejected", exercising the dry-run wiring without needing a
+// real cross-arch xray binary on the dev machine.
 func GetBinaryPath() string {
+	if p := os.Getenv("NEXCORE_XRAY_BIN"); p != "" {
+		return p
+	}
 	return "bin/" + GetBinaryName()
 }
 
