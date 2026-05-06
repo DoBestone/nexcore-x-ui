@@ -19,6 +19,39 @@
         <a-layout-content>
             <a-spin :spinning="spinning" :delay="200" :tip="loadingTip"/>
             <transition name="list" appear>
+                <a-row v-if="updateInfo.updateAvailable">
+                    <a-card hoverable style="border-left: 4px solid #f59e0b;">
+                        <a-row type="flex" align="middle" :gutter="16">
+                            <a-col :flex="1">
+                                <a-icon type="cloud-download" style="color: #f59e0b; font-size: 20px; margin-right: 10px;"></a-icon>
+                                <strong>面板有新版本可用</strong>
+                                <a-tag color="orange" style="margin-left: 10px">
+                                    [[ updateInfo.current || '?' ]] → [[ updateInfo.latest ]]
+                                </a-tag>
+                                <a-tooltip v-if="updateInfo.release && updateInfo.release.body" placement="bottom">
+                                    <template slot="title">
+                                        <pre style="white-space: pre-wrap; max-width: 400px; max-height: 200px; overflow: auto; margin: 0; font-size: 12px; color: #fff;">[[ updateInfo.release.body ]]</pre>
+                                    </template>
+                                    <a-icon type="info-circle" style="color: #94a3b8; margin-left: 6px;"></a-icon>
+                                </a-tooltip>
+                            </a-col>
+                            <a-col>
+                                <a-popconfirm title="升级时面板会重启,需重新登录。继续?"
+                                              ok-text="开始升级" cancel-text="取消"
+                                              @confirm="applyUpdate">
+                                    <a-button type="primary" :loading="updating.applying" icon="cloud-download">
+                                        在线升级到 [[ updateInfo.latest ]]
+                                    </a-button>
+                                </a-popconfirm>
+                                <a-button type="link" href="https://github.com/DoBestone/nexcore-x-ui/releases" target="_blank">
+                                    更新日志
+                                </a-button>
+                            </a-col>
+                        </a-row>
+                    </a-card>
+                </a-row>
+            </transition>
+            <transition name="list" appear>
                 <a-row>
                     <a-card hoverable>
                         <a-row>
@@ -278,6 +311,8 @@
             versionModal,
             spinning: false,
             loadingTip: '加载中',
+            updateInfo: { current: '', latest: '', updateAvailable: false, release: null },
+            updating: { applying: false },
         },
         methods: {
             loading(spinning, tip = '加载中') {
@@ -316,8 +351,30 @@
                     },
                 });
             },
+            // 静默版本检查 — 进入仪表盘自动跑一次,不打扰用户;有新版本才渲染顶部卡片。
+            // 网络错误/限流静默吞掉,失败不影响正常仪表盘。
+            async checkPanelUpdate() {
+                try {
+                    const msg = await HttpUtil.get('/xui/api/update/check');
+                    if (msg.success && msg.obj) {
+                        this.updateInfo = msg.obj;
+                    }
+                } catch (e) { /* offline / rate-limited / etc. */ }
+            },
+            async applyUpdate() {
+                this.updating.applying = true;
+                const msg = await HttpUtil.post('/xui/api/update/apply', {});
+                // 升级成功面板会立即 SIGHUP,这里 8s 后强制刷新让用户进新版本登录页。
+                if (msg.success) {
+                    this.$message.success('升级已发起,面板将在数秒内重启');
+                    setTimeout(() => location.reload(), 8000);
+                } else {
+                    this.updating.applying = false;
+                }
+            },
         },
         async mounted() {
+            this.checkPanelUpdate();
             while (true) {
                 try {
                     await this.getStatus();

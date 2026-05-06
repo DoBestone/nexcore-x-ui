@@ -28,3 +28,4 @@ bin/geosite.dat
 .DS_Store
 .sync*
 tmp/
+.claude/

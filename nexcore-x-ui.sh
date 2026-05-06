@@ -182,11 +182,19 @@ cmd_uninstall() {
 
 cmd_creds() {
     require_installed
+    # install-info.txt 是首次启动时写入的明文凭据快照。一旦在面板内改过密码/端口,
+    # binary 会主动删除它(密码 bcrypt 单向无法回写,留着会误导)。
     if [[ -f "${INFO_FILE}" ]]; then
         cat "${INFO_FILE}"
+        echo
+        info "以上为首次安装快照;面板内改过密码后,该文件会被自动删除"
     else
-        warn "install-info.txt 不存在(可能你已经手动改过密码或删除了文件)"
-        "${INSTALL_DIR}/${CMD_NAME}" setting -show
+        warn "install-info.txt 已不存在 — 你已经在面板里改过密码 / 端口"
+        warn "密码经 bcrypt 哈希存储,无法还原明文。忘了请用:${CMD_NAME} reset"
+        echo
+        hdr "当前实际设置"
+        "${INSTALL_DIR}/${CMD_NAME}" setting -show 2>/dev/null || \
+            warn "binary 不支持 setting -show,看面板设置页"
     fi
 }
 

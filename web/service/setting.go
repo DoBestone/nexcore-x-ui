@@ -232,7 +232,12 @@ func (s *SettingService) GetPort() (int, error) {
 }
 
 func (s *SettingService) SetPort(port int) error {
-	return s.setInt("webPort", port)
+	if err := s.setInt("webPort", port); err != nil {
+		return err
+	}
+	// Same reasoning as UserService: the install-info.txt port value is now stale.
+	database.RemoveInstallInfo()
+	return nil
 }
 
 func (s *SettingService) GetCertFile() (string, error) {
@@ -326,5 +331,8 @@ func (s *SettingService) UpdateAllSetting(allSetting *entity.AllSetting) error {
 			errs = append(errs, err)
 		}
 	}
+	// Operator touched panel settings — assume webPort may have moved; the
+	// install-info.txt snapshot is therefore unreliable.
+	database.RemoveInstallInfo()
 	return common.Combine(errs...)
 }

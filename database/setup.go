@@ -147,6 +147,18 @@ func readSettingInt(key string, fallback int) int {
 	return n
 }
 
+// RemoveInstallInfo deletes the install-info.txt snapshot if present. Called
+// after operator-driven mutations (password / port change) since the snapshot
+// can no longer be reconstructed from a bcrypt hash and is misleading once
+// values have diverged. Errors are intentionally swallowed (best-effort).
+func RemoveInstallInfo() {
+	if savedDBPath == "" {
+		return
+	}
+	fp := path.Join(path.Dir(savedDBPath), installInfoFilename)
+	_ = os.Remove(fp)
+}
+
 // PreserveFirstRunInfoOnce reads install-info.txt back so a tool like the
 // install.sh wrapper can echo the credentials after the binary started.
 // Returns nil, nil when the file does not exist.

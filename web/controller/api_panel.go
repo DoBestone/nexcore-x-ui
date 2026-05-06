@@ -60,10 +60,13 @@ func (a *APIPanelController) listTokens(c *gin.Context) {
 }
 
 func (a *APIPanelController) createToken(c *gin.Context) {
+	// Browser sends form-urlencoded by default (see web/assets/js/axios-init.js
+	// global interceptor inherited from vaxilu/x-ui). ShouldBind picks JSON or
+	// form based on Content-Type, so this works for both browser and curl.
 	var body struct {
-		Name string `json:"name"`
+		Name string `json:"name" form:"name"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil {
+	if err := c.ShouldBind(&body); err != nil {
 		jsonMsg(c, "创建 token", err)
 		return
 	}
@@ -142,9 +145,9 @@ func (a *APIPanelController) updateCheck(c *gin.Context) {
 
 func (a *APIPanelController) updateApply(c *gin.Context) {
 	var body struct {
-		Version string `json:"version"`
+		Version string `json:"version" form:"version"`
 	}
-	_ = c.ShouldBindJSON(&body)
+	_ = c.ShouldBind(&body)
 	out, err := a.updateService.ApplyLatest(body.Version)
 	if err != nil {
 		jsonObj(c, nil, err)

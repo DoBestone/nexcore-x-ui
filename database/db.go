@@ -12,9 +12,13 @@ import (
 	"nexcore-x-ui/config"
 )
 
-var db *gorm.DB
+var (
+	db           *gorm.DB
+	savedDBPath  string
+)
 
 func InitDB(dbPath string) error {
+	savedDBPath = dbPath
 	dir := path.Dir(dbPath)
 	err := os.MkdirAll(dir, fs.ModeDir)
 	if err != nil {
