@@ -41,17 +41,93 @@
                         </a-row>
                     </a-card>
                 </transition>
+                <!-- v1.1.2:把入站拆成两个卡片渲染。多用户协议(VLESS/VMess/
+                     Trojan/SS-2022)用客户级管理语义,单用户协议(SS-legacy/
+                     Socks/HTTP/Dokodemo/Wireguard)保留 inbound 级二维码 +
+                     单一密码模型。表头和操作菜单按各自语义裁剪。 -->
                 <transition name="list" appear>
-                    <a-card hoverable>
+                    <a-card hoverable style="margin-top: 16px;">
                         <div slot="title">
                             <a-button type="primary" icon="plus" @click="openAddInbound"></a-button>
+                            <span style="margin-left: 12px; color: #1e3a8a; font-weight: 600;">
+                                <a-icon type="team"></a-icon> 多用户入站
+                            </span>
+                            <span style="margin-left: 8px; color: #94a3b8; font-size: 12px;">
+                                VLESS / VMess / Trojan / SS-2022 — 一个端口多个客户
+                            </span>
                         </div>
-<!--                        <a-input v-model="searchKey" placeholder="搜索" autofocus style="max-width: 300px"></a-input>-->
-                        <a-table :columns="columns" :row-key="dbInbound => dbInbound.id"
-                                 :data-source="dbInbounds"
+                        <a-empty v-if="multiUserInbounds.length === 0" description="还没有多用户入站,点上方 + 创建" />
+                        <a-table v-else
+                                 :columns="multiUserColumns" :row-key="dbInbound => dbInbound.id"
+                                 :data-source="multiUserInbounds"
+                                 :loading="spinning" :scroll="{ x: 1300 }"
+                                 :pagination="false"
+                                 @change="() => getDBInbounds()">
+                            <template slot="action" slot-scope="text, dbInbound">
+                                <a-button type="primary" size="small" icon="user"
+                                          @click="ctModal.show(dbInbound)"
+                                          style="margin-right: 6px;">客户端</a-button>
+                                <a-dropdown :trigger="['click']">
+                                    <a @click="e => e.preventDefault()">更多</a>
+                                    <a-menu slot="overlay" @click="a => clickAction(a, dbInbound)">
+                                        <a-menu-item key="edit">
+                                            <a-icon type="edit"></a-icon>编辑
+                                        </a-menu-item>
+                                        <a-menu-item key="clone">
+                                            <a-icon type="copy"></a-icon>克隆(改端口)
+                                        </a-menu-item>
+                                        <a-menu-item key="resetTraffic">
+                                            <a-icon type="retweet"></a-icon>重置流量(总)
+                                        </a-menu-item>
+                                        <a-menu-item key="delete">
+                                            <span style="color: #FF4D4F">
+                                                <a-icon type="delete"></a-icon>删除
+                                            </span>
+                                        </a-menu-item>
+                                    </a-menu>
+                                </a-dropdown>
+                            </template>
+                            <template slot="clientCount" slot-scope="text, dbInbound">
+                                <a-tag color="blue">[[ multiUserClientCount(dbInbound) ]] 个客户</a-tag>
+                            </template>
+                            <template slot="protocol" slot-scope="text, dbInbound">
+                                <a-tag color="blue">[[ dbInbound.protocol ]]</a-tag>
+                            </template>
+                            <template slot="traffic" slot-scope="text, dbInbound">
+                                <a-tag color="blue">总:[[ sizeFormat(dbInbound.up + dbInbound.down) ]]</a-tag>
+                                <span style="color:#94a3b8;font-size:11px;margin-left:4px;">
+                                    每客户单独额度
+                                </span>
+                            </template>
+                            <template slot="enable" slot-scope="text, dbInbound">
+                                <a-switch v-model="dbInbound.enable" @change="switchEnable(dbInbound)"></a-switch>
+                            </template>
+                            <template slot="stream" slot-scope="text, dbInbound, index">
+                                <a-tag color="green">[[ inbounds[multiUserIndex(index)].stream.network ]]</a-tag>
+                                <a-tag v-if="inbounds[multiUserIndex(index)].stream.isTls" color="blue">tls</a-tag>
+                                <a-tag v-if="inbounds[multiUserIndex(index)].stream.isXTls" color="blue">xtls</a-tag>
+                            </template>
+                        </a-table>
+                    </a-card>
+                </transition>
+
+                <!-- 单用户卡片 — 老 columns 全保留(含二维码) -->
+                <transition name="list" appear>
+                    <a-card hoverable style="margin-top: 16px;">
+                        <div slot="title">
+                            <span style="color: #92400e; font-weight: 600;">
+                                <a-icon type="user"></a-icon> 单用户入站
+                            </span>
+                            <span style="margin-left: 8px; color: #94a3b8; font-size: 12px;">
+                                Shadowsocks legacy / Socks / HTTP / Dokodemo / Wireguard — 单一密码或转发协议
+                            </span>
+                        </div>
+                        <a-empty v-if="singleUserInbounds.length === 0" description="(无单用户入站)" />
+                        <a-table v-else
+                                 :columns="columns" :row-key="dbInbound => dbInbound.id"
+                                 :data-source="singleUserInbounds"
                                  :loading="spinning" :scroll="{ x: 1500 }"
                                  :pagination="false"
-                                 style="margin-top: 20px"
                                  @change="() => getDBInbounds()">
                             <template slot="action" slot-scope="text, dbInbound">
                                 <a-dropdown :trigger="['click']">
@@ -65,9 +141,6 @@
                                         </a-menu-item>
                                         <a-menu-item key="clone">
                                             <a-icon type="copy"></a-icon>克隆(改端口)
-                                        </a-menu-item>
-                                        <a-menu-item key="clientTraffic">
-                                            <a-icon type="user"></a-icon>客户端流量
                                         </a-menu-item>
                                         <a-menu-item key="resetTraffic">
                                             <a-icon type="retweet"></a-icon>重置流量
@@ -192,6 +265,20 @@
         scopedSlots: { customRender: 'expiryTime' },
     }];
 
+    // v1.1.2:多用户卡片用的精简 columns。砍掉「在线 IP」「详细信息」「到期
+    // 时间」(都已经按客户级展示在 ctModal 里),换成「客户数」一列让用户
+    // 一眼看到这个入站当前挂多少人。流量列也变 inbound 级"总和"语义。
+    const multiUserColumns = [
+        { title: '操作',  align: 'center', scopedSlots: { customRender: 'action' },     width: 160 },
+        { title: '启用',  align: 'center', scopedSlots: { customRender: 'enable' },     width: 70 },
+        { title: '协议',  align: 'center', scopedSlots: { customRender: 'protocol' },   width: 80 },
+        { title: '端口',  align: 'center', dataIndex: 'port',                            width: 80 },
+        { title: '客户数', align: 'center', scopedSlots: { customRender: 'clientCount' }, width: 110 },
+        { title: '总流量', align: 'center', scopedSlots: { customRender: 'traffic' },    width: 220 },
+        { title: '传输',  align: 'center', scopedSlots: { customRender: 'stream' },     width: 120 },
+        { title: '备注',  align: 'center', dataIndex: 'remark' },
+    ];
+
     const app = new Vue({
         delimiters: ['[[', ']]'],
         el: '#app',
@@ -203,8 +290,24 @@
             searchKey: '',
             onlineIps: {},      // tag -> [ip,...]
             onlineIpsTimer: null,
+            columns,
+            multiUserColumns,
         },
         methods: {
+            // v1.1.2:多用户卡片 slot 用的 helper。slot v-for 拿到的是过滤
+            // 后子集索引,但 inbounds[] 是全集 — 这里反查全集索引。
+            multiUserClientCount(dbInbound) {
+                try {
+                    const s = JSON.parse(dbInbound.settings || '{}');
+                    return Array.isArray(s.clients) ? s.clients.length : 0;
+                } catch (e) { return 0; }
+            },
+            multiUserIndex(filteredIndex) {
+                const dbInbound = this.multiUserInbounds[filteredIndex];
+                if (!dbInbound) return 0;
+                const found = this.dbInbounds.findIndex(x => x.id === dbInbound.id);
+                return found >= 0 ? found : 0;
+            },
             loading(spinning=true) {
                 this.spinning = spinning;
             },
@@ -443,9 +546,17 @@
                     down: down,
                     up: up,
                 };
-            }
+            },
+            // v1.1.2 双卡片渲染
+            multiUserInbounds() {
+                return this.dbInbounds.filter(x => x.isMultiUser);
+            },
+            singleUserInbounds() {
+                return this.dbInbounds.filter(x => !x.isMultiUser);
+            },
         },
     });
+
 
 </script>
 {{template "inboundModal"}}

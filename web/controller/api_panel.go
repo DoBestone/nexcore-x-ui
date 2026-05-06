@@ -27,6 +27,8 @@ type APIPanelController struct {
 	updateService        service.UpdateService
 	clientTrafficService service.ClientTrafficService
 	xrayService          service.XrayService
+	clientService        service.ClientService
+	inboundService       service.InboundService
 }
 
 func NewAPIPanelController(g *gin.RouterGroup) *APIPanelController {
@@ -55,6 +57,13 @@ func (a *APIPanelController) initRouter(g *gin.RouterGroup) {
 	g.GET("/inbounds/:id/client-traffics", a.listClientTraffics)
 	g.POST("/clients/:email/reset-traffic", a.resetClientTraffic)
 	g.POST("/clients/:email/limits", a.patchClientLimits)  // 浏览器走全局 form-urlencoded
+
+	// v1.1.x:面板侧 client CRUD,给客户端流量 modal 用。镜像
+	// /api/v1/inbounds/:id/clients/* 但 session-auth,前端不需要 token。
+	g.POST("/inbounds/:id/clients", a.addInboundClient)
+	g.PUT("/inbounds/:id/clients/:identifier", a.updateInboundClient)
+	g.DELETE("/inbounds/:id/clients/:identifier", a.deleteInboundClient)
+	g.GET("/inbounds/:id/info", a.getInboundInfo) // 给 modal 拿 protocol 决定字段
 }
 
 // ---------- tokens ----------
@@ -207,6 +216,71 @@ func (a *APIPanelController) patchClientLimits(c *gin.Context) {
 	}
 	a.xrayService.SetToNeedRestart()
 	jsonMsg(c, "更新", nil)
+}
+
+// ---------- inbound client CRUD (v1.1.2 panel-side) ----------
+
+// addInboundClient — 前端"+添加客户端"按钮调。body 是协议对应的
+// client object,直接传给 ClientService。错误经 humanizeApiError 映射
+// 成中文(jsonMsg 已经做了 err.Error 拼接)。
+func (a *APIPanelController) addInboundClient(c *gin.Context) {
+	id := int(getUriId(c))
+	var client map[string]any
+	if err := c.ShouldBindJSON(&client); err != nil {
+		jsonMsg(c, "添加客户端", err)
+		return
+	}
+	if _, err := a.clientService.AddClient(id, client); err != nil {
+		jsonMsg(c, "添加客户端", err)
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	jsonMsg(c, "添加客户端", nil)
+}
+
+func (a *APIPanelController) updateInboundClient(c *gin.Context) {
+	id := int(getUriId(c))
+	identifier := c.Param("identifier")
+	var client map[string]any
+	if err := c.ShouldBindJSON(&client); err != nil {
+		jsonMsg(c, "更新客户端", err)
+		return
+	}
+	if _, err := a.clientService.UpdateClient(id, identifier, client); err != nil {
+		jsonMsg(c, "更新客户端", err)
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	jsonMsg(c, "更新客户端", nil)
+}
+
+func (a *APIPanelController) deleteInboundClient(c *gin.Context) {
+	id := int(getUriId(c))
+	identifier := c.Param("identifier")
+	if _, err := a.clientService.DeleteClient(id, identifier); err != nil {
+		jsonMsg(c, "删除客户端", err)
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	jsonMsg(c, "删除客户端", nil)
+}
+
+// getInboundInfo — modal 弹出时调一次,返回 protocol + 现有 client 数,
+// 让前端根据协议类型决定显示什么字段(vless: id+flow+email,vmess:
+// id+alterId+email,trojan/ss-2022: password+email)
+func (a *APIPanelController) getInboundInfo(c *gin.Context) {
+	id := int(getUriId(c))
+	in, err := a.inboundService.GetInbound(id)
+	if err != nil {
+		jsonMsg(c, "获取入站", err)
+		return
+	}
+	jsonObj(c, gin.H{
+		"id":       in.Id,
+		"protocol": in.Protocol,
+		"port":     in.Port,
+		"settings": in.Settings,
+	}, nil)
 }
 
 // ---------- docs ----------

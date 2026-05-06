@@ -83,6 +83,20 @@ class DBInbound {
         return this.protocol === Protocols.HTTP;
     }
 
+    // v1.1.2:多用户协议判定。VLESS/VMess/Trojan 100%,Shadowsocks 看
+    // method 是不是 2022-blake3-*(legacy aead 单 password 单 user)。
+    // 列表页用它来把入站拆成两个卡片,不同表头不同操作菜单。
+    get isMultiUser() {
+        if (this.isVLess || this.isVMess || this.isTrojan) return true;
+        if (this.isSS) {
+            try {
+                const s = JSON.parse(this.settings || '{}');
+                return typeof s.method === 'string' && s.method.startsWith('2022-blake3-');
+            } catch (e) { return false; }
+        }
+        return false;
+    }
+
     get address() {
         let address = location.hostname;
         if (!ObjectUtil.isEmpty(this.listen) && this.listen !== "0.0.0.0") {

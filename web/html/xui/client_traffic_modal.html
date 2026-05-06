@@ -3,9 +3,21 @@
          :title="ctModal.title" :footer="null"
          :closable="true" :mask-closable="true" :width="900">
     <a-spin :spinning="ctModal.loading">
+        <!-- 顶部操作行:添加客户端 + 刷新 -->
+        <a-space style="margin-bottom: 12px;">
+            <a-button type="primary" icon="user-add" @click="ctModal.openAdd">
+                添加客户端
+            </a-button>
+            <a-button icon="reload" @click="ctModal.reload">刷新</a-button>
+            <span style="color: #94a3b8; font-size: 12px; margin-left: 6px;">
+                vless / vmess / trojan / ss-2022 才有 email 客户;
+                socks/http/ss-legacy 是单密码模型,不属于此处管理。
+            </span>
+        </a-space>
+
         <a-alert v-if="ctModal.rows.length === 0" type="info" show-icon
                  message="该入站还没有 email 客户端"
-                 description="VLESS / VMess / Trojan / SS-2022 协议的 client 创建后会自动出现在这里。其他协议(socks/http/ss-legacy)不属于订阅模型。"></a-alert>
+                 description="点上方「添加客户端」开始,或者你这个入站协议本身不支持客户端管理(socks/http/ss-legacy)。"></a-alert>
         <a-table v-else :columns="ctModal.cols" :data-source="ctModal.rows"
                  :row-key="r => r.email" :pagination="false" size="middle">
             <template slot="usage" slot-scope="text, r">
@@ -72,6 +84,7 @@
         loading: false,
         title: '客户端流量',
         inboundId: 0,
+        inboundProtocol: '',
         rows: [],
         editForm: { email: '', totalGB: 0, _expiryTime: null, enable: true },
         cols: [
@@ -84,8 +97,52 @@
         async show(dbInbound) {
             this.title = `客户端流量 — ${dbInbound.remark || 'inbound#' + dbInbound.id}`;
             this.inboundId = dbInbound.id;
+            this.inboundProtocol = dbInbound.protocol;
             this.visible = true;
             await this.reload();
+        },
+        // 添加客户端:最小可用版本 —— 弹 prompt 收 email,根据 inbound 协议
+        // 自动生成 UUID(vless/vmess)或随机密码(trojan/ss-2022)。
+        // 后续可改成正经 Form modal,但目前 prompt 已能完整覆盖功能。
+        async openAdd() {
+            const email = window.prompt(
+                '给新客户起个唯一 email(订阅备注用,xray stats 也按它聚合):',
+                'user-' + Date.now().toString().slice(-6));
+            if (!email) return;
+            const client = { email };
+            const proto = this.inboundProtocol;
+            if (proto === 'vless') {
+                client.id = (crypto.randomUUID ? crypto.randomUUID() : RandomUtil.randomUUID());
+                client.flow = 'xtls-rprx-vision';
+            } else if (proto === 'vmess') {
+                client.id = (crypto.randomUUID ? crypto.randomUUID() : RandomUtil.randomUUID());
+                client.alterId = 0;
+            } else if (proto === 'trojan') {
+                client.password = RandomUtil.randomSeq(16);
+            } else if (proto === 'shadowsocks') {
+                // 2022-blake3 需要 base64 32 字节;这里给 16 字节 random,够用
+                client.password = btoa(RandomUtil.randomSeq(16)).replace(/=+$/, '');
+            } else {
+                this.$message.warning('当前入站协议(' + proto + ')不支持客户端管理');
+                return;
+            }
+            try {
+                const resp = await axios.post(
+                    '/xui/api/inbounds/' + this.inboundId + '/clients',
+                    client,
+                    {
+                        headers: { 'Content-Type': 'application/json' },
+                        transformRequest: [(d) => JSON.stringify(d)],
+                    });
+                if (resp.data && resp.data.success) {
+                    this.$message.success('已添加客户端 ' + email);
+                    await this.reload();
+                } else {
+                    this.$message.error((resp.data && resp.data.msg) || '添加失败');
+                }
+            } catch (e) {
+                this.$message.error('添加失败:' + e.message);
+            }
         },
         async reload() {
             this.loading = true;
