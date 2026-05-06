@@ -195,6 +195,21 @@
             // 应用,后端 dry-run 会以 xray 自己的错误信息精确告诉用户哪个字段
             // 还需要补,而不是 UI 这层硬性拦截(避免妨碍调试用法)。
             applyRealityForm() {
+                // 前置校验:reality 没 keypair 是绝对跑不起来的,这里挡一下
+                // 而不是让用户提交后被 xray test 拒掉再绕回来。dest 没填走默认。
+                const f = this.inModal.realityForm;
+                if (!f.privateKey) {
+                    this.$message.warning('请填 Private Key(节点上跑 xray x25519 拿到)');
+                    return;
+                }
+                if (!f.publicKey) {
+                    this.$message.warning('请填 Public Key(分享链接需要,xray x25519 同时输出)');
+                    return;
+                }
+                if (!f.serverNames) {
+                    this.$message.warning('请填至少一个 SNI(serverNames),逗号分隔多个');
+                    return;
+                }
                 const split = (s) => (s || '')
                     .split(',')
                     .map(x => x.trim())
@@ -254,6 +269,18 @@
 
             applyHTTPUpgradeForm() {
                 const f = this.inModal.huForm;
+                if (!f.host) {
+                    this.$message.warning('请填 Host(客户端连接时的 Host header)');
+                    return;
+                }
+                if (f.tls && !f.tlsServer) {
+                    this.$message.warning('启用 TLS 时需要填 TLS 域名 (SNI)');
+                    return;
+                }
+                if (f.tls && (!f.certFile || !f.keyFile)) {
+                    this.$message.warning('启用 TLS 时需要填证书和私钥文件路径');
+                    return;
+                }
                 const snippet = {
                     network: 'httpupgrade',
                     security: f.tls ? 'tls' : 'none',
@@ -276,6 +303,18 @@
 
             applyXHTTPForm() {
                 const f = this.inModal.xhForm;
+                if (!f.host) {
+                    this.$message.warning('请填 Host');
+                    return;
+                }
+                if (f.tls && !f.tlsServer) {
+                    this.$message.warning('启用 TLS 时需要填 TLS 域名');
+                    return;
+                }
+                if (f.tls && (!f.certFile || !f.keyFile)) {
+                    this.$message.warning('启用 TLS 时需要填证书和私钥文件路径');
+                    return;
+                }
                 const snippet = {
                     network: 'xhttp',
                     security: f.tls ? 'tls' : 'none',

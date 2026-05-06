@@ -63,6 +63,9 @@
                                         <a-menu-item key="edit">
                                             <a-icon type="edit"></a-icon>编辑
                                         </a-menu-item>
+                                        <a-menu-item key="clone">
+                                            <a-icon type="copy"></a-icon>克隆(改端口)
+                                        </a-menu-item>
                                         <a-menu-item key="resetTraffic">
                                             <a-icon type="retweet"></a-icon>重置流量
                                         </a-menu-item>
@@ -240,6 +243,9 @@
                     case "edit":
                         this.openEditInbound(dbInbound);
                         break;
+                    case "clone":
+                        this.openCloneInbound(dbInbound);
+                        break;
                     case "resetTraffic":
                         this.resetTraffic(dbInbound);
                         break;
@@ -247,6 +253,36 @@
                         this.delInbound(dbInbound);
                         break;
                 }
+            },
+            // 克隆入站:复制配置打开"添加"模态框,但端口字段已经预填到一个
+            // 候选空闲端口(原端口 + 1, 如果占用就 +2 ...),备注加 " - copy"。
+            // 对支持多用户的协议(VLESS/VMess/Trojan/SS-2022),后端 dry-run 会
+            // 用 ErrProtocolSingleton 拒掉——这是预期行为,提示用户去原入站
+            // 加 client 而不是新建第二个。
+            openCloneInbound(dbInbound) {
+                const inbound = dbInbound.toInbound();
+                const cloneDb = new DBInbound(JSON.parse(JSON.stringify(dbInbound)));
+                // 找一个不冲突的端口作为预填值
+                const taken = new Set(this.dbInbounds.map(x => x.port));
+                let p = (cloneDb.port || 10000) + 1;
+                while (taken.has(p) && p < 65535) p++;
+                inbound.port = p;
+                cloneDb.port = p;
+                cloneDb.id = 0;
+                cloneDb.up = 0;
+                cloneDb.down = 0;
+                cloneDb.remark = (dbInbound.remark || '') + ' - copy';
+                inModal.show({
+                    title: '克隆入站(基于 #' + dbInbound.id + ')',
+                    okText: '创建',
+                    inbound,
+                    dbInbound: cloneDb,
+                    confirm: async (inb, db) => {
+                        inModal.loading();
+                        await this.addInbound(inb, db);
+                        inModal.close();
+                    },
+                });
             },
             openAddInbound() {
                 inModal.show({

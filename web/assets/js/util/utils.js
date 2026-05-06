@@ -9,6 +9,12 @@ class HttpUtil {
         if (msg.success) {
             Vue.prototype.$message.success(msg.msg);
         } else {
+            // Translate machine-readable API codes to friendly Chinese text
+            // before showing. humanizeApiError leaves unknown messages alone,
+            // so legacy plain-Chinese errors still display unchanged.
+            try {
+                msg.msg = humanizeApiError(msg.msg);
+            } catch (e) { /* defensive: never block error toast */ }
             Vue.prototype.$message.error(msg.msg);
         }
     }
@@ -87,6 +93,53 @@ class PromiseUtil {
         });
     }
 
+}
+
+// humanizeApiError 把后端抛出的 "<操作>失败: <code>: <details>" 字符串翻译
+// 成对用户更友好的中文文案。后端为了机器可读保留了错误码(供业务系统 switch),
+// 前端为了用户体验把已知 code 转成解释 + 保留原文 details 作为定位线索。
+//
+// 使用:`HttpUtil` 的回调里 _handleMsg 会自动调它,任何调用方拿到的 msg.msg
+// 都是处理后的中文。无 code 匹配时原样返回(降级到 v1.0.9 之前的行为)。
+const apiErrorCodeMap = {
+    xray_config_invalid:   'xray 校验候选配置失败,字段非法',
+    protocol_singleton:    '该协议(VLESS/VMess/Trojan/SS-2022)全局只允许一个入站,请编辑现有入站添加客户端',
+    invalid_body:          '请求体格式错误',
+    invalid_json:          '请求体不是合法 JSON',
+    invalid_id:            'id 格式错误',
+    invalid_port:          '端口必须是 1~65535',
+    inbound_not_found:     '该入站不存在',
+    create_failed:         '创建失败',
+    update_failed:         '更新失败',
+    delete_failed:         '删除失败',
+    reset_failed:          '重置失败',
+    host_required:         '需要传 host 参数(节点对外可达地址)',
+    client_identifier_required: '客户端 email 字段必填',
+    client_not_found:      '客户端不存在',
+    client_duplicate:      '该 email 在此入站已存在',
+    unsupported_protocol:  '该协议不支持客户端管理',
+    token_not_found:       'token 不存在',
+    revoke_failed:         '撤销 token 失败',
+    rename_failed:         '重命名失败',
+    cert_save_failed:      '证书保存失败(PEM 解析或落盘错误)',
+    xray_restart_failed:   'xray 重启失败',
+    update_check_failed:   '检查更新失败(GitHub API 不可达)',
+    update_apply_failed:   '在线升级失败',
+    db_error:              '数据库错误',
+    rotate_failed:         '生成 token 失败',
+};
+
+function humanizeApiError(raw) {
+    if (typeof raw !== 'string' || raw.length === 0) return raw;
+    // 后端常见格式 "<操作>失败: <code>: <details>" 或 "<code>: <details>"。
+    // 用第一个含下划线的 token 当 code 候选,其后做 details。
+    const m = raw.match(/(?:.*?[::]\s*)?([a-z][a-z0-9_]+)(?:\s*[::]\s*([\s\S]*))?/);
+    if (!m) return raw;
+    const code = m[1];
+    const details = (m[2] || '').trim();
+    const human = apiErrorCodeMap[code];
+    if (!human) return raw;
+    return details ? `${human}(${details})` : human;
 }
 
 const seq = [
