@@ -1,0 +1,169 @@
+{{define "clientTrafficModal"}}
+<a-modal id="client-traffic-modal" v-model="ctModal.visible"
+         :title="ctModal.title" :footer="null"
+         :closable="true" :mask-closable="true" :width="900">
+    <a-spin :spinning="ctModal.loading">
+        <a-alert v-if="ctModal.rows.length === 0" type="info" show-icon
+                 message="该入站还没有 email 客户端"
+                 description="VLESS / VMess / Trojan / SS-2022 协议的 client 创建后会自动出现在这里。其他协议(socks/http/ss-legacy)不属于订阅模型。"></a-alert>
+        <a-table v-else :columns="ctModal.cols" :data-source="ctModal.rows"
+                 :row-key="r => r.email" :pagination="false" size="middle">
+            <template slot="usage" slot-scope="text, r">
+                <a-tag color="blue">[[ sizeFormat(r.up + r.down) ]]</a-tag>
+                <template v-if="r.total > 0">
+                    <span style="color: #94a3b8;"> / </span>
+                    <a-tag :color="r.up + r.down >= r.total ? 'red' : 'cyan'">
+                        [[ sizeFormat(r.total) ]]
+                    </a-tag>
+                </template>
+                <a-tag v-else color="green">无限</a-tag>
+            </template>
+            <template slot="expiry" slot-scope="text, r">
+                <a-tag v-if="r.expiryTime > 0"
+                       :color="r.expiryTime <= Date.now() ? 'red' : 'blue'">
+                    [[ DateUtil.formatMillis(r.expiryTime) ]]
+                </a-tag>
+                <a-tag v-else color="green">永久</a-tag>
+            </template>
+            <template slot="enable" slot-scope="text, r">
+                <a-switch :checked="r.enable"
+                          @change="(v) => ctModal.toggleEnable(r, v)"></a-switch>
+            </template>
+            <template slot="action" slot-scope="text, r">
+                <a-button type="link" size="small"
+                          @click="ctModal.resetTraffic(r)">重置流量</a-button>
+                <a-button type="link" size="small"
+                          @click="ctModal.editLimits(r)">编辑额度</a-button>
+            </template>
+        </a-table>
+    </a-spin>
+</a-modal>
+
+<!-- 编辑额度内嵌 modal — 用 a-modal 嵌套(antd 1.7 支持) -->
+<a-modal id="ct-edit-modal" v-model="ctModal.editVisible"
+         title="编辑客户端额度" @ok="ctModal.applyEdit">
+    <a-form :label-col="{ span: 8 }" :wrapper-col="{ span: 14 }">
+        <a-form-item label="email">
+            <a-input :value="ctModal.editForm.email" disabled></a-input>
+        </a-form-item>
+        <a-form-item>
+            <span slot="label">流量上限 (GB)</span>
+            <a-input-number v-model="ctModal.editForm.totalGB" :min="0" :step="1"
+                            style="width: 200px;"></a-input-number>
+            <span style="color: #94a3b8; margin-left: 8px;">0 = 无限</span>
+        </a-form-item>
+        <a-form-item label="到期时间">
+            <a-date-picker :show-time="{ format: 'HH:mm' }" format="YYYY-MM-DD HH:mm"
+                           v-model="ctModal.editForm._expiryTime"
+                           style="width: 280px;"
+                           :allow-clear="true"
+                           placeholder="不设 = 永不过期"></a-date-picker>
+        </a-form-item>
+        <a-form-item label="启用">
+            <a-switch v-model="ctModal.editForm.enable"></a-switch>
+        </a-form-item>
+    </a-form>
+</a-modal>
+
+<script>
+    const ctModal = {
+        visible: false,
+        editVisible: false,
+        loading: false,
+        title: '客户端流量',
+        inboundId: 0,
+        rows: [],
+        editForm: { email: '', totalGB: 0, _expiryTime: null, enable: true },
+        cols: [
+            { title: 'email',     dataIndex: 'email' },
+            { title: '已用 / 上限', scopedSlots: { customRender: 'usage' } },
+            { title: '到期',      scopedSlots: { customRender: 'expiry' } },
+            { title: '启用',      scopedSlots: { customRender: 'enable' }, width: 80 },
+            { title: '操作',      scopedSlots: { customRender: 'action' }, width: 200 },
+        ],
+        async show(dbInbound) {
+            this.title = `客户端流量 — ${dbInbound.remark || 'inbound#' + dbInbound.id}`;
+            this.inboundId = dbInbound.id;
+            this.visible = true;
+            await this.reload();
+        },
+        async reload() {
+            this.loading = true;
+            const msg = await HttpUtil.get('/xui/api/inbounds/' + this.inboundId + '/client-traffics');
+            this.loading = false;
+            if (msg.success) this.rows = msg.obj || [];
+        },
+        async resetTraffic(r) {
+            const msg = await HttpUtil.post('/xui/api/clients/' + encodeURIComponent(r.email) + '/reset-traffic');
+            if (msg.success) await this.reload();
+        },
+        async toggleEnable(r, v) {
+            // PATCH limits 走原生 axios + 显式 JSON,绕过 axios-init.js 全局
+            // form-encoded 拦截器(SetLimitsParams 用 *bool 指针语义,form
+            // 编码无法表达"未设置 vs false")。transformRequest:[] 阻止全局
+            // 拦截器把 body 转字符串。
+            try {
+                const resp = await axios.post(
+                    '/xui/api/clients/' + encodeURIComponent(r.email) + '/limits',
+                    { enable: v },
+                    {
+                        headers: { 'Content-Type': 'application/json' },
+                        transformRequest: [(d) => JSON.stringify(d)],
+                    });
+                if (resp.data && resp.data.success) {
+                    this.$message.success('已更新');
+                    await this.reload();
+                } else {
+                    this.$message.error((resp.data && resp.data.msg) || '更新失败');
+                }
+            } catch (e) {
+                this.$message.error('更新失败:' + e.message);
+            }
+        },
+        editLimits(r) {
+            this.editForm = {
+                email: r.email,
+                totalGB: r.total ? Math.floor(r.total / (1024 * 1024 * 1024)) : 0,
+                _expiryTime: r.expiryTime > 0 ? moment(r.expiryTime) : null,
+                enable: r.enable,
+            };
+            this.editVisible = true;
+        },
+        async applyEdit() {
+            const f = this.editForm;
+            const body = {
+                total: f.totalGB > 0 ? f.totalGB * 1024 * 1024 * 1024 : 0,
+                expiryTime: f._expiryTime ? f._expiryTime.valueOf() : 0,
+                enable: f.enable,
+            };
+            try {
+                const resp = await axios.post(
+                    '/xui/api/clients/' + encodeURIComponent(f.email) + '/limits',
+                    body,
+                    {
+                        headers: { 'Content-Type': 'application/json' },
+                        transformRequest: [(d) => JSON.stringify(d)],
+                    });
+                if (resp.data && resp.data.success) {
+                    this.$message.success('已保存');
+                    this.editVisible = false;
+                    await this.reload();
+                } else {
+                    this.$message.error((resp.data && resp.data.msg) || '保存失败');
+                }
+            } catch (e) {
+                this.$message.error('保存失败:' + e.message);
+            }
+        },
+    };
+
+    new Vue({
+        delimiters: ['[[', ']]'],
+        el: '#client-traffic-modal',
+        data: { ctModal },
+        methods: {
+            sizeFormat(b) { return sizeFormat(b); },
+        },
+    });
+</script>
+{{end}}

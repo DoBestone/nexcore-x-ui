@@ -22,9 +22,11 @@ var docsFS embed.FS
 // to external systems. Wiring a separate controller (rather than calling
 // /api/v1 from the browser with an API token) keeps tokens server-side.
 type APIPanelController struct {
-	tokenService  service.APITokenService
-	apiLogService service.APILogService
-	updateService service.UpdateService
+	tokenService         service.APITokenService
+	apiLogService        service.APILogService
+	updateService        service.UpdateService
+	clientTrafficService service.ClientTrafficService
+	xrayService          service.XrayService
 }
 
 func NewAPIPanelController(g *gin.RouterGroup) *APIPanelController {
@@ -47,6 +49,12 @@ func (a *APIPanelController) initRouter(g *gin.RouterGroup) {
 
 	g.GET("/update/check", a.updateCheck)
 	g.POST("/update/apply", a.updateApply)
+
+	// v1.1.0 per-client traffic 面板侧:给入站详情 modal 用,session-auth。
+	// 跟 /api/v1/clients/* 镜像但不要 token,前端 ajax 直接调即可。
+	g.GET("/inbounds/:id/client-traffics", a.listClientTraffics)
+	g.POST("/clients/:email/reset-traffic", a.resetClientTraffic)
+	g.POST("/clients/:email/limits", a.patchClientLimits)  // 浏览器走全局 form-urlencoded
 }
 
 // ---------- tokens ----------
@@ -160,6 +168,45 @@ func (a *APIPanelController) updateApply(c *gin.Context) {
 		return
 	}
 	jsonObj(c, out, nil)
+}
+
+// ---------- per-client traffic (v1.1.0) ----------
+
+func (a *APIPanelController) listClientTraffics(c *gin.Context) {
+	id := int(getUriId(c))
+	rows, err := a.clientTrafficService.ListByInbound(id)
+	if err != nil {
+		jsonObj(c, nil, err)
+		return
+	}
+	jsonObj(c, rows, nil)
+}
+
+func (a *APIPanelController) resetClientTraffic(c *gin.Context) {
+	email := c.Param("email")
+	if err := a.clientTrafficService.ResetTraffic(email); err != nil {
+		jsonMsg(c, "重置流量", err)
+		return
+	}
+	jsonMsg(c, "重置流量", nil)
+}
+
+func (a *APIPanelController) patchClientLimits(c *gin.Context) {
+	email := c.Param("email")
+	var body service.SetLimitsParams
+	// 前端 ctModal 显式 application/json,所以这里走 ShouldBindJSON;
+	// SetLimitsParams 用 *int64/*bool 指针语义,form-urlencoded 表达不了
+	// "未设置"和"显式 0/false" 的区别。
+	if err := c.ShouldBindJSON(&body); err != nil {
+		jsonMsg(c, "更新", err)
+		return
+	}
+	if err := a.clientTrafficService.SetLimits(email, body); err != nil {
+		jsonMsg(c, "更新", err)
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	jsonMsg(c, "更新", nil)
 }
 
 // ---------- docs ----------

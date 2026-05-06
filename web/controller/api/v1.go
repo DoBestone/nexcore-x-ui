@@ -42,9 +42,10 @@ type V1Controller struct {
 	certService    service.CertService
 	systemService  service.SystemService
 	magicService   service.MagicTokenService
-	apiLogService    service.APILogService
-	updateService    service.UpdateService
-	blockRuleService service.BlockRuleService
+	apiLogService        service.APILogService
+	updateService        service.UpdateService
+	blockRuleService     service.BlockRuleService
+	clientTrafficService service.ClientTrafficService
 }
 
 func NewV1Controller(g *gin.RouterGroup) *V1Controller {
@@ -139,6 +140,15 @@ func (a *V1Controller) register(g *gin.RouterGroup) {
 	api.POST("/inbounds/:id/clients", a.addClient)
 	api.PUT("/inbounds/:id/clients/:identifier", a.updateClient)
 	api.DELETE("/inbounds/:id/clients/:identifier", a.deleteClient)
+
+	// v1.1.0 per-client traffic / quota / expiry —— 业务系统对接面。
+	// 按 email 全局唯一,所以路径以 email 为主,不嵌入 inbound id;
+	// 列表查询则按 inbound id 来(入站详情页用)。
+	api.GET("/inbounds/:id/client-traffics", a.listClientTraffics)
+	api.GET("/clients/:email/traffic", a.getClientTraffic)
+	api.POST("/clients/:email/reset-traffic", a.resetClientTraffic)
+	api.PATCH("/clients/:email/limits", a.patchClientLimits)
+	api.POST("/clients/disable-expired", a.disableExpiredClients)
 
 	api.POST("/certs", a.uploadCert)
 	api.DELETE("/certs/:name", a.deleteCert)
@@ -880,6 +890,86 @@ func mapClientErr(err error) string {
 	default:
 		return "client_op_failed"
 	}
+}
+
+// ---------- per-client traffic (v1.1.0) ----------
+// API 层是业务系统对接面,所以错误码 / 入参语义都以"email 全局唯一"为
+// 中心,而不是 inbound + identifier 的二级路径。
+
+func (a *V1Controller) listClientTraffics(c *gin.Context) {
+	id, ok := parseIntParam(c, "id")
+	if !ok {
+		return
+	}
+	rows, err := a.clientTrafficService.ListByInbound(id)
+	if err != nil {
+		Internal(c, "db_error", err)
+		return
+	}
+	OK(c, rows)
+}
+
+func (a *V1Controller) getClientTraffic(c *gin.Context) {
+	email := c.Param("email")
+	row, err := a.clientTrafficService.GetByEmail(email)
+	if err != nil {
+		if errors.Is(err, service.ErrClientTrafficNotFound) {
+			NotFound(c, "client_traffic_not_found", "no client_traffics row for email "+email)
+			return
+		}
+		Internal(c, "db_error", err)
+		return
+	}
+	OK(c, row)
+}
+
+func (a *V1Controller) resetClientTraffic(c *gin.Context) {
+	email := c.Param("email")
+	if err := a.clientTrafficService.ResetTraffic(email); err != nil {
+		if errors.Is(err, service.ErrClientTrafficNotFound) {
+			NotFound(c, "client_traffic_not_found", err.Error())
+			return
+		}
+		Internal(c, "reset_failed", err)
+		return
+	}
+	OK(c, gin.H{"reset": true, "email": email})
+}
+
+func (a *V1Controller) patchClientLimits(c *gin.Context) {
+	email := c.Param("email")
+	var body service.SetLimitsParams
+	if err := c.ShouldBindJSON(&body); err != nil {
+		BadRequest(c, "invalid_body", err.Error())
+		return
+	}
+	if err := a.clientTrafficService.SetLimits(email, body); err != nil {
+		if errors.Is(err, service.ErrClientTrafficNotFound) {
+			NotFound(c, "client_traffic_not_found", err.Error())
+			return
+		}
+		Internal(c, "update_failed", err)
+		return
+	}
+	// SetLimits 只改 client_traffics,xray 自身配置(settings.clients[])
+	// 不变 — 但 enable=false 需要 xray reload 才能踢下线,所以无脑标 dirty。
+	a.xrayService.SetToNeedRestart()
+	row, _ := a.clientTrafficService.GetByEmail(email)
+	OK(c, row)
+}
+
+// disableExpiredClients —— 业务系统月初对账 / 定时任务后调,扫描所有
+// 已到期但还 enable 的 client,批量置为 enable=false 并触发 xray reload。
+func (a *V1Controller) disableExpiredClients(c *gin.Context) {
+	disabled, err := a.clientTrafficService.DisableExpired(time.Now().UnixMilli())
+	if err != nil {
+		Internal(c, "update_failed", err)
+		return
+	}
+	if len(disabled) > 0 {
+		a.xrayService.SetToNeedRestart()
+	}
+	OK(c, gin.H{"disabled": disabled, "count": len(disabled)})
 }
 
 // ---------- xray config / template / logs ----------

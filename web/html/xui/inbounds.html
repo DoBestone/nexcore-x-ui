@@ -66,6 +66,9 @@
                                         <a-menu-item key="clone">
                                             <a-icon type="copy"></a-icon>克隆(改端口)
                                         </a-menu-item>
+                                        <a-menu-item key="clientTraffic">
+                                            <a-icon type="user"></a-icon>客户端流量
+                                        </a-menu-item>
                                         <a-menu-item key="resetTraffic">
                                             <a-icon type="retweet"></a-icon>重置流量
                                         </a-menu-item>
@@ -245,6 +248,9 @@
                         break;
                     case "clone":
                         this.openCloneInbound(dbInbound);
+                        break;
+                    case "clientTraffic":
+                        ctModal.show(dbInbound);
                         break;
                     case "resetTraffic":
                         this.resetTraffic(dbInbound);
@@ -447,5 +453,6 @@
 {{template "qrcodeModal"}}
 {{template "textModal"}}
 {{template "inboundInfoModal"}}
+{{template "clientTrafficModal"}}
 </body>
 </html>

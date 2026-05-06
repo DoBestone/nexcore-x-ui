@@ -86,6 +86,14 @@ func (s *ClientService) AddClient(inboundID int, client map[string]any) (*model.
 	if err := s.inboundService.UpdateInbound(in); err != nil {
 		return nil, err
 	}
+	// v1.1.0:同步给 client_traffics 建行(per-client 流量/到期跟踪)。
+	// email 字段是 stats key,从 client object 里拿。新建 client 默认
+	// 继承 inbound 级 total/expiry 作为初始上限,后续业务系统可通过
+	// /api/v1/clients/:email/limits PATCH 单独改。
+	if email, _ := client["email"].(string); email != "" {
+		_ = (&ClientTrafficService{}).EnsureRow(inboundID, email,
+			in.Total, in.ExpiryTime, in.Enable)
+	}
 	s.xrayService.SetToNeedRestart()
 	return in, nil
 }
@@ -129,6 +137,17 @@ func (s *ClientService) UpdateClient(inboundID int, identifier string, patch map
 	if err := s.inboundService.UpdateInbound(in); err != nil {
 		return nil, err
 	}
+	// v1.1.0:同步 client_traffics 行 — 处理两种情况:
+	//  · email 没改:identifier == new email,EnsureRow 走 update 分支
+	//  · email 改了:旧行还在(以 identifier 命名),新行需要建 → 调
+	//    DeleteByEmail(identifier) 删旧 + EnsureRow(new) 建新
+	if newEmail, _ := patch["email"].(string); newEmail != "" {
+		cts := &ClientTrafficService{}
+		if newEmail != identifier {
+			_ = cts.DeleteByEmail(identifier)
+		}
+		_ = cts.EnsureRow(inboundID, newEmail, in.Total, in.ExpiryTime, in.Enable)
+	}
 	s.xrayService.SetToNeedRestart()
 	return in, nil
 }
@@ -164,6 +183,10 @@ func (s *ClientService) DeleteClient(inboundID int, identifier string) (*model.I
 	if err := s.inboundService.UpdateInbound(in); err != nil {
 		return nil, err
 	}
+	// v1.1.0:client_traffics 行也清理掉。identifier 可能是 email
+	// (vless/vmess/trojan/ss-2022 这几个走 email 路径),也可能是别
+	// 的字段;不管怎样安全删 — DeleteByEmail 不存在就 no-op。
+	_ = (&ClientTrafficService{}).DeleteByEmail(identifier)
 	s.xrayService.SetToNeedRestart()
 	return in, nil
 }

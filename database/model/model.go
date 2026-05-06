@@ -112,6 +112,29 @@ type APILog struct {
 	TokenName  string `json:"tokenName"` // "" if anonymous (e.g. /health)
 }
 
+// ClientTraffic — v1.1.0 引入的 per-client 维度行,把"用户/客户"提升到
+// 一等公民。每个 inbound.settings.clients[] 里每条 client 在这张表里有
+// 一行,xray gRPC stats 按 email 聚合的流量也写到这里,而不再只在 inbound
+// 级累加。这是支持订阅运营(单 inbound 多用户独立计费/到期)的基础设施。
+//
+// email 在 xray-core 设计里就是全局唯一(stats key 是
+// "user>>>email>>>traffic>>>uplink/downlink"),所以这里 email 列加 unique
+// 索引;同入站内重名会被 xray 自己拒掉,跨入站重名没意义 stats 会撞车。
+//
+// total / expiryTime 0 = 不限制 / 不过期,跟 Inbound 级语义一致。
+// enable=false 由 AddTraffic 顺手 check 自动写(到期/触顶),也允许操作员
+// 通过 API 手动置回 true(配合 ResetTraffic)。
+type ClientTraffic struct {
+	Id         int    `json:"id"         gorm:"primaryKey;autoIncrement"`
+	InboundId  int    `json:"inboundId"  gorm:"index;not null"`
+	Email      string `json:"email"      gorm:"uniqueIndex;not null"`
+	Up         int64  `json:"up"`
+	Down       int64  `json:"down"`
+	Total      int64  `json:"total"`      // 流量上限(字节),0=不限
+	ExpiryTime int64  `json:"expiryTime"` // unix 毫秒,0=永不过期
+	Enable     bool   `json:"enable"      gorm:"default:true"`
+}
+
 // BlockRule 描述一条"屏蔽规则"，最终注入到 Xray routing.rules 数组的最前面，
 // 把命中的流量路由到 outbound `blocked`(黑洞)。多条规则按 (InboundTag, Type)
 // 分组合并以减少 Xray 规则数。

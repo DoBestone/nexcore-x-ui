@@ -3,6 +3,7 @@ package database
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 
 	"github.com/go-gormigrate/gormigrate/v2"
 	"gorm.io/gorm"
@@ -146,8 +147,87 @@ func runMigrations(db *gorm.DB) error {
 				return tx.Migrator().DropTable(&model.BlockRule{})
 			},
 		},
+		{
+			// v1.1.0:per-client 流量/到期 维度。建表 + 回填:把现有
+			// inbound.settings.clients[] 里所有 email 解析出来,在
+			// client_traffics 表里建对应行(up/down=0,total/expiry/enable
+			// 沿用 inbound 级配置 — 因为老数据没有 per-client 字段)。
+			//
+			// 不存在 email 的 client(socks/http accounts、ss legacy 单
+			// 密码)跳过 — 这些协议不属于"订阅 client"模型。
+			//
+			// migration 是 once-only,后续新增 client 走 ClientTrafficService。
+			ID: "0010_client_traffics",
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(&model.ClientTraffic{}); err != nil {
+					return err
+				}
+				return backfillClientTraffics(tx)
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return tx.Migrator().DropTable(&model.ClientTraffic{})
+			},
+		},
 	})
 	return m.Migrate()
+}
+
+// backfillClientTraffics 解析每个 inbound.settings.clients[],为每条
+// 带 email 的 client 在 client_traffics 表里建行。同 email 已存在时
+// 跳过(幂等,允许 migration 在意外被重跑后不破坏数据)。
+func backfillClientTraffics(tx *gorm.DB) error {
+	var inbounds []model.Inbound
+	if err := tx.Find(&inbounds).Error; err != nil {
+		return err
+	}
+	for _, in := range inbounds {
+		// settings 是 raw JSON 字符串,parse 出 clients 数组。
+		var settings struct {
+			Clients []map[string]interface{} `json:"clients"`
+		}
+		if in.Settings == "" {
+			continue
+		}
+		if err := jsonUnmarshal([]byte(in.Settings), &settings); err != nil {
+			// 非订阅类协议(socks/http/ss legacy)settings 没有 clients,
+			// json.Unmarshal 失败 OR clients=nil,都跳过。
+			continue
+		}
+		for _, c := range settings.Clients {
+			email, _ := c["email"].(string)
+			if email == "" {
+				continue
+			}
+			// 幂等:已存在就跳过。
+			var n int64
+			if err := tx.Model(&model.ClientTraffic{}).
+				Where("email = ?", email).Count(&n).Error; err != nil {
+				return err
+			}
+			if n > 0 {
+				continue
+			}
+			row := &model.ClientTraffic{
+				InboundId:  in.Id,
+				Email:      email,
+				Up:         0,
+				Down:       0,
+				Total:      in.Total,      // 老数据没 per-client 上限,继承 inbound 级
+				ExpiryTime: in.ExpiryTime, // 同上
+				Enable:     in.Enable,
+			}
+			if err := tx.Create(row).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// jsonUnmarshal — alias for clarity in backfill code; mostly so a future
+// migration can swap the parser without grepping.
+func jsonUnmarshal(data []byte, v interface{}) error {
+	return json.Unmarshal(data, v)
 }
 
 func isHex(s string) bool {
