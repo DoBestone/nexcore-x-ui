@@ -83,14 +83,88 @@ cmd_log_tail() {
 # ---------- group: install lifecycle ----------
 
 cmd_install() {
-    info "拉取 install.sh"
+    info "首次安装 — 拉取并执行 install.sh"
     bash <(curl -fsSL "https://raw.githubusercontent.com/${GH_OWNER}/${GH_REPO}/main/install.sh") "$@"
 }
 
+# update 是日常升级路径,刻意不走 install.sh:
+#   - 不动 systemd unit(保留你 Environment= 等自定义)
+#   - 不重装系统依赖(apt-get 慢且无意义)
+#   - 不动 ${DATA_DIR}/(数据库 + install-info.txt 完整保留)
+#   - 只:下载 tarball → stop → 替换二进制+脚本+xray binary → start
+# 想做完整重装请改用 \`${CMD_NAME} install\`。
 cmd_update() {
     require_installed
-    info "在线更新到最新版本"
-    bash <(curl -fsSL "https://raw.githubusercontent.com/${GH_OWNER}/${GH_REPO}/main/install.sh") "$@"
+    local target="${1:-}"
+
+    # 1. resolve version
+    if [[ -z "${target}" ]]; then
+        info "查询最新版本"
+        target=$(curl -fsSL "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases/latest" \
+            | grep -E '"tag_name":' \
+            | sed -E 's/.*"([^"]+)".*/\1/' || true)
+        [[ -z "${target}" ]] && die "无法获取最新版本(GitHub API 限流?)"
+    fi
+
+    # 2. detect arch
+    local arch
+    case $(uname -m) in
+        x86_64|x64|amd64) arch=amd64 ;;
+        aarch64|arm64)    arch=arm64 ;;
+        armv7l|armv7)     arch=armv7 ;;
+        s390x)            arch=s390x ;;
+        *) die "未支持的架构 $(uname -m)" ;;
+    esac
+
+    local current
+    current=$("${INSTALL_DIR}/${CMD_NAME}" -v 2>/dev/null || echo unknown)
+    info "当前 ${current} → 目标 ${target} (${arch})"
+    if [[ "${target}" == "${current}" || "${target}" == "v${current}" ]]; then
+        confirm "已经是 ${current},仍要重装?" "n" || { info "已取消"; return; }
+    fi
+
+    # 3. download
+    local url="https://github.com/${GH_OWNER}/${GH_REPO}/releases/download/${target}/nexcore-x-ui-linux-${arch}.tar.gz"
+    local tmp; tmp=$(mktemp -d -t nexcore-update.XXXXXX)
+    trap "rm -rf '${tmp}'" RETURN
+    info "下载 ${url}"
+    if ! curl -fSL --connect-timeout 10 -o "${tmp}/pkg.tar.gz" "${url}"; then
+        die "下载失败"
+    fi
+
+    # 4. extract + sanity check
+    tar -xzf "${tmp}/pkg.tar.gz" -C "${tmp}/"
+    [[ -d "${tmp}/${CMD_NAME}" ]] || die "压缩包结构异常,缺少 ${CMD_NAME}/ 目录"
+    [[ -f "${tmp}/${CMD_NAME}/${CMD_NAME}" ]] || die "压缩包缺少二进制 ${CMD_NAME}"
+
+    # 5. stop service, swap files, start
+    info "停止服务"
+    systemctl stop "${SERVICE_NAME}"
+
+    info "替换二进制 + 脚本"
+    install -m 0755 "${tmp}/${CMD_NAME}/${CMD_NAME}"      "${INSTALL_DIR}/${CMD_NAME}"
+    install -m 0755 "${tmp}/${CMD_NAME}/${CMD_NAME}.sh"   "${INSTALL_DIR}/${CMD_NAME}.sh"
+    install -m 0755 "${INSTALL_DIR}/${CMD_NAME}.sh"       "/usr/bin/${CMD_NAME}"
+    if [[ -d "${tmp}/${CMD_NAME}/bin" ]]; then
+        # 保留旧 config.json — 业务运行时数据,不属于发行包内容
+        local keep=""
+        [[ -f "${INSTALL_DIR}/bin/config.json" ]] && keep="${INSTALL_DIR}/bin/config.json"
+        rm -rf "${INSTALL_DIR}/bin"
+        cp -a "${tmp}/${CMD_NAME}/bin" "${INSTALL_DIR}/bin"
+        chmod +x "${INSTALL_DIR}/bin/"* 2>/dev/null || true
+        [[ -n "${keep}" ]] && cp "${keep}.bak" "${INSTALL_DIR}/bin/config.json" 2>/dev/null || true
+    fi
+
+    # systemd unit:仅当 release 中的 .service 文件 与 当前 已不同时才覆盖,
+    # 并且备份旧的(保留任何 Environment= 等手动调整)。日常 update 不动它。
+    info "启动服务"
+    systemctl start "${SERVICE_NAME}"
+    sleep 1
+
+    local new
+    new=$("${INSTALL_DIR}/${CMD_NAME}" -v 2>/dev/null || echo unknown)
+    ok "升级完成: ${current} → ${new}"
+    cmd_status
 }
 
 cmd_uninstall() {
