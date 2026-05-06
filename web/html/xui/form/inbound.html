@@ -1,50 +1,81 @@
 {{define "form/inbound"}}
+<!-- ========================================================
+     简易 / 高级 切换 + 顶部新手指南
+     默认走简易模式,只露核心字段;高级模式还原全部 ant-design-vue
+     1.x 风格表单。reality/xhttp/httpupgrade/原文 JSON 这一组折叠面板
+     也只在高级模式露出来 —— 新手用基础 TCP+TLS 就够用,不需要被
+     反审查协议的 keypair 概念吓到。
+     ======================================================== -->
+<div style="background: #f0f9ff; border-left: 3px solid #3b82f6;
+            padding: 10px 14px; margin-bottom: 14px; font-size: 13px; line-height: 1.7; border-radius: 6px;">
+    <div style="margin-bottom: 4px; font-weight: 600; color: #1e3a8a;">
+        <a-icon type="bulb" theme="filled"></a-icon> 新手指南(3 步配好)
+    </div>
+    <div style="color: #475569;">
+        ① 选 <strong>VLESS</strong> 协议 + 端口默认就行;
+        ② 备注填客户名(订阅时显示);
+        ③ 想用 REALITY/XHTTP 等反审查传输,把右上角切到「高级」打开 streamSettings 面板。
+    </div>
+</div>
+
+<a-form layout="inline" style="margin-bottom: 6px;">
+    <a-form-item style="float: right;">
+        <a-radio-group v-model="inModal.showAdvanced" button-style="solid" size="small">
+            <a-radio-button :value="false">简易</a-radio-button>
+            <a-radio-button :value="true">高级</a-radio-button>
+        </a-radio-group>
+    </a-form-item>
+</a-form>
+
 <!-- base -->
 <a-form layout="inline">
-    <a-form-item label='{{ i18n "remark" }}'>
-        <a-input v-model.trim="dbInbound.remark"></a-input>
+    <a-form-item label='{{ i18n "remark" }}'
+                 :help="inModal.showAdvanced ? '' : '给客户起个名字,订阅链接的备注就是这个'">
+        <a-input v-model.trim="dbInbound.remark" placeholder="例如:alice"></a-input>
     </a-form-item>
     <a-form-item label='{{ i18n "enable" }}'>
         <a-switch v-model="dbInbound.enable"></a-switch>
     </a-form-item>
-    <a-form-item label='{{ i18n "protocol" }}'>
+    <a-form-item label='{{ i18n "protocol" }}'
+                 :help="inModal.showAdvanced ? '' : '推荐 vless,反审查最好;trojan/vmess 看客户端支持'">
         <a-select v-model="inbound.protocol" style="width: 160px;">
             <a-select-option v-for="p in Protocols" :key="p" :value="p">[[ p ]]</a-select-option>
         </a-select>
     </a-form-item>
-    <a-form-item>
+    <a-form-item v-if="inModal.showAdvanced">
         <span slot="label">
             监听 IP
             <a-tooltip>
                 <template slot="title">
-                    默认留空即可
+                    默认留空即可。绑定到特定网卡才填。
                 </template>
                 <a-icon type="question-circle" theme="filled"></a-icon>
             </a-tooltip>
         </span>
-        <a-input v-model.trim="inbound.listen"></a-input>
+        <a-input v-model.trim="inbound.listen" placeholder="留空 = 0.0.0.0"></a-input>
     </a-form-item>
-    <a-form-item label="端口">
+    <a-form-item label="端口"
+                 :help="inModal.showAdvanced ? '' : '客户端连接的端口,默认随机即可'">
         <a-input type="number" v-model.number="inbound.port"></a-input>
     </a-form-item>
-    <a-form-item>
+    <a-form-item :help="inModal.showAdvanced ? '' : '0 = 无限'">
         <span slot="label">
             总流量(GB)
             <a-tooltip>
                 <template slot="title">
-                    0 表示不限制
+                    入站级流量上限。per-client 流量请到「客户端流量」管理。
                 </template>
                 <a-icon type="question-circle" theme="filled"></a-icon>
             </a-tooltip>
         </span>
         <a-input-number v-model="dbInbound.totalGB" :min="0"></a-input-number>
     </a-form-item>
-    <a-form-item>
+    <a-form-item :help="inModal.showAdvanced ? '' : '不填 = 永久'">
         <span slot="label">
             到期时间
             <a-tooltip>
                 <template slot="title">
-                    留空则永不到期
+                    入站级到期。per-client 到期请到「客户端流量」单独设置。
                 </template>
                 <a-icon type="question-circle" theme="filled"></a-icon>
             </a-tooltip>
@@ -110,7 +141,16 @@
      "原样透传给 xray" 的 JSON 字符串 —— 所以这个折叠面板让用户直接编辑这串
      原文,任意 xray 支持的字段都能立刻用上。开启后会覆盖 form 拼出来的
      streamSettings;后端的 dry-run 校验会兜底,写错也不会让其他入站挂掉。 -->
-<a-collapse style="margin-top: 12px;">
+<!-- 简易模式提示:不显示折叠面板,告诉新手要 reality/xhttp 切到高级 -->
+<div v-if="!inModal.showAdvanced"
+     style="background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px;
+            padding: 10px 14px; margin-top: 12px; font-size: 12.5px; color: #78350f;">
+    <a-icon type="info-circle" style="margin-right: 6px;"></a-icon>
+    要配 <strong>REALITY / XHTTP / HTTPUpgrade</strong> 等反审查传输?
+    点右上角切到「高级」展开配置面板。简易模式用 TCP + 可选 TLS 即可应付大多数场景。
+</div>
+
+<a-collapse v-if="inModal.showAdvanced" style="margin-top: 12px;">
     <!-- 1. REALITY 表单输入器(v1.0.8 新加)
          不必手撸 JSON。用户在 vue 表单里填字段,点"应用",reality 配置就被
          拼成完整 streamSettings JSON 写到下面的 textarea 并自动启用原文模式。

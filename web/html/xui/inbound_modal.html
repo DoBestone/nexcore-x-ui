@@ -18,6 +18,11 @@
         // streamSettings,绕过 inbound.stream.toString() 的 form-to-JSON 流程。
         // 这是 v1.0.6 让用户能在 UI 里立刻用 REALITY / XHTTP 的最小手段 ——
         // 完整专用表单留 v1.0.7+。后端 dry-run 兜底,写错直接拒绝不会害到面板。
+        // 简易/高级模式切换 — 默认简易,新手不被反审查参数吓住。
+        // 编辑老入站打开时自动判定:如果它的 streamSettings 里有 reality
+        // 或 xhttp/httpupgrade 等高级字段,默认走高级模式给出完整 UI;
+        // 否则保持简易。
+        showAdvanced: false,
         useRawStream: false,
         rawStreamSettings: '',
         // REALITY 表单输入器状态(v1.0.8)。和 useRawStream 联动:
@@ -64,6 +69,19 @@
             // on if they need to keep editing the JSON).
             this.useRawStream = false;
             this.rawStreamSettings = '';
+            // 编辑现有入站时:如果它的 streamSettings 已经在用高级特性
+            // (reality / xhttp / httpupgrade / 非 tcp/ws 网络),自动
+            // 切到高级模式 — 不然简易表单 UI 就丢字段了用户搞不清状态。
+            this.showAdvanced = false;
+            try {
+                const ss = inbound ? JSON.parse(inbound.stream.toString()) : null;
+                if (ss && (
+                    (ss.security && ss.security !== 'none' && ss.security !== 'tls') ||
+                    (ss.network && !['tcp', 'ws'].includes(ss.network))
+                )) {
+                    this.showAdvanced = true;
+                }
+            } catch (e) { /* fallthrough — 简易就好 */ }
             this.realityForm = {
                 dest: 'www.cloudflare.com:443',
                 serverNames: 'www.cloudflare.com',
