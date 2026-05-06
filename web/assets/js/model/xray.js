@@ -40,9 +40,16 @@ const RULE_DOMAIN = {
     SPEEDTEST: 'geosite:speedtest',
 };
 
+// Flow control modes for VLESS / Trojan. xtls-rprx-vision is the modern
+// (2023+) standard — high throughput + active-probe resistance, paired with
+// REALITY for SNI camouflage. xtls-rprx-origin/direct are kept only so old
+// inbounds round-trip cleanly; new inbounds should pick vision (or "" for
+// no flow control, which is what every non-XTLS protocol uses).
 const FLOW_CONTROL = {
-    ORIGIN: "xtls-rprx-origin",
-    DIRECT: "xtls-rprx-direct",
+    NONE:   "",
+    VISION: "xtls-rprx-vision",
+    ORIGIN: "xtls-rprx-origin", // legacy
+    DIRECT: "xtls-rprx-direct", // legacy
 };
 
 Object.freeze(Protocols);
