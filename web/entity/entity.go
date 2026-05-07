@@ -48,6 +48,11 @@ type AllSetting struct {
 	// 节点名称(e.g. "香港节点1") — 注入到 share link 的 ps/remarks 字段,
 	// 客户端导入订阅时一眼能看出这一条出自哪个节点。空 = 不加前缀(旧行为)。
 	NodeName string `json:"nodeName" form:"nodeName"`
+
+	// 安全入口:启用后面板需要带上 secureEntryPath 才能访问,扫端口
+	// 看到的是裸 404。default off,启用要二次确认 + 提示新 URL。
+	SecureEntryEnabled bool   `json:"secureEntryEnabled" form:"secureEntryEnabled"`
+	SecureEntryPath    string `json:"secureEntryPath" form:"secureEntryPath"`
 }
 
 func (s *AllSetting) CheckValid() error {
@@ -85,6 +90,26 @@ func (s *AllSetting) CheckValid() error {
 	_, err = time.LoadLocation(s.TimeLocation)
 	if err != nil {
 		return common.NewError("time location not exist:", s.TimeLocation)
+	}
+
+	// 安全入口校验:启用时 path 必须非空且只包含 letters/digits/_/-,
+	// 单段无斜杠 — 避免用户写出 "/foo/bar" 这种导致路由拼接异常。
+	// 长度 4-64,太短没意义(秒级穷举),太长复制易漏字符。
+	if s.SecureEntryEnabled {
+		p := strings.TrimSpace(s.SecureEntryPath)
+		if p == "" {
+			return common.NewError("启用安全入口必须提供 secureEntryPath(建议随机字母数字串)")
+		}
+		if len(p) < 4 || len(p) > 64 {
+			return common.NewError("secureEntryPath 长度需在 4-64 之间,当前长度:", len(p))
+		}
+		for _, r := range p {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+				(r >= '0' && r <= '9') || r == '_' || r == '-') {
+				return common.NewError("secureEntryPath 只允许字母/数字/_/-,出现非法字符:", string(r))
+			}
+		}
+		s.SecureEntryPath = p
 	}
 
 	return nil

@@ -76,6 +76,11 @@ export interface AllSetting {
   // 节点名称(e.g. "香港节点1") — 注入到 share link 的 ps 字段方便
   // 客户端识别。空 = 不加前缀。
   nodeName: string
+
+  // 安全入口:启用后面板需要带 secureEntryPath 才能访问。
+  // 启用前必须先填 path,否则保存会被后端拒掉(避免改完自己进不来)。
+  secureEntryEnabled: boolean
+  secureEntryPath: string
 }
 
 // 出站服务器 — 用户配置的中转节点。Inbound 通过 outboundTag 字段关联。

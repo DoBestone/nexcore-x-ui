@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { postForm } from '@/api/http'
 import type { AllSetting } from '@/api/types'
@@ -79,6 +79,96 @@ async function testWebhook() {
   }
 }
 
+// ---------- 安全入口 ----------
+// 启用后必须以 webBasePath + secureEntryPath/ 访问面板,扫端口看到
+// 裸 404 不再吐 SPA。生成按钮:24 字符随机串(letters+digits),足够
+// 让端口扫描+暴力组合不现实。开启前给完整新 URL,提示用户记下来 +
+// 重启面板才生效 — 因为 basePath 在 initRouter 一次性读取。
+function randomSlug(len = 24): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+  const arr = new Uint8Array(len)
+  if (typeof crypto !== 'undefined') {
+    crypto.getRandomValues(arr)
+  } else {
+    for (let i = 0; i < len; i++) arr[i] = Math.floor(Math.random() * 256)
+  }
+  let out = ''
+  for (let i = 0; i < len; i++) out += chars[arr[i] % chars.length]
+  return out
+}
+
+function regenSecureEntry() {
+  if (!all.value) return
+  all.value.secureEntryPath = randomSlug(24)
+}
+
+// 当前预览:把 webBasePath + secureEntryPath/ 拼出来给用户看,启用前
+// 一眼就能知道新 URL 长什么样;同时计算完整 url(含 origin)方便复制。
+const previewBase = computed(() => {
+  const s = all.value
+  if (!s) return ''
+  const base = s.webBasePath || '/'
+  const slug = (s.secureEntryPath || '').trim()
+  if (!slug) return base
+  return (base.endsWith('/') ? base : base + '/') + slug + '/'
+})
+
+const previewUrl = computed(() => {
+  if (typeof window === 'undefined') return previewBase.value
+  return window.location.origin + previewBase.value
+})
+
+async function saveSecureEntry() {
+  if (!all.value) return
+  // 启用前先校验 path 非空 — 后端 CheckValid 也会拒,这里前置一次
+  // 给更友好的弹窗。
+  if (all.value.secureEntryEnabled && !(all.value.secureEntryPath || '').trim()) {
+    ElMessage.warning('启用前请先生成或填写安全入口路径')
+    return
+  }
+  const action = all.value.secureEntryEnabled ? '启用' : '关闭'
+  try {
+    await ElMessageBox.confirm(
+      all.value.secureEntryEnabled
+        ? `确认启用安全入口?保存并重启面板后,只能通过下面的 URL 进入,务必先记下:\n\n${previewUrl.value}\n\n忘了 URL 可以 SSH 到服务器查 SQLite settings 表恢复。`
+        : '确认关闭安全入口?面板将退回到普通 URL 直接可达。',
+      `${action}安全入口`,
+      {
+        type: 'warning',
+        confirmButtonText: action,
+        cancelButtonText: '取消',
+        dangerouslyUseHTMLString: false
+      }
+    )
+  } catch {
+    return
+  }
+  await postForm('xui/setting/update', all.value as unknown as Record<string, unknown>)
+  ElMessage.success(`已${action},点「重启面板」生效;新 URL: ${previewUrl.value}`)
+}
+
+async function copyEntryUrl() {
+  const text = previewUrl.value
+  try {
+    if (window.isSecureContext && navigator.clipboard) {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success('已复制')
+      return
+    }
+  } catch {
+    /* fallthrough */
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  const ok = document.execCommand('copy')
+  document.body.removeChild(ta)
+  ElMessage[ok ? 'success' : 'warning'](ok ? '已复制' : '复制失败')
+}
+
 // ---------- magic link ----------
 const magicTtl = ref(600)
 const magicLink = ref('')
@@ -145,6 +235,52 @@ onMounted(() => {
               <el-form-item>
                 <el-button type="primary" :loading="saving" @click="save">保存</el-button>
                 <el-button type="danger" plain @click="restart">重启面板</el-button>
+              </el-form-item>
+            </el-form>
+          </div>
+        </el-card>
+
+        <!-- 安全入口卡片:把整个面板锁到一个秘密 URL 后面。启用前展示
+             完整新 URL + 大字号警告,因为忘了入口=自己进不来。 -->
+        <el-card style="margin-top: 16px">
+          <template #header>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-weight: 600">安全入口</span>
+              <el-tag v-if="all?.secureEntryEnabled" type="success" size="small">已启用</el-tag>
+              <el-tag v-else type="info" size="small">未启用</el-tag>
+            </div>
+          </template>
+          <p class="nx-muted" style="margin: 0 0 12px 0; font-size: 13px;">
+            启用后,面板只在下方「完整 URL」下应答,任何其它路径返回 404。
+            扫端口的工具看不到登录界面,显著降低被自动化工具发现的概率。
+            <strong>启用前务必先生成路径并记下完整 URL,否则保存重启后自己也进不来。</strong>
+          </p>
+          <div v-if="all">
+            <el-form label-width="120px" label-position="left">
+              <el-form-item label="启用安全入口">
+                <el-switch v-model="all.secureEntryEnabled" />
+              </el-form-item>
+              <el-form-item label="入口路径">
+                <el-input
+                  v-model="all.secureEntryPath"
+                  placeholder="留空 = 未配置;字母/数字/_-,4-64 位"
+                >
+                  <template #append>
+                    <el-button @click="regenSecureEntry">随机生成</el-button>
+                  </template>
+                </el-input>
+              </el-form-item>
+              <el-form-item label="完整 URL">
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1; min-width: 0;">
+                  <code style="background: var(--nx-bg); padding: 4px 10px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; word-break: break-all; flex: 1; min-width: 0;">{{ previewUrl }}</code>
+                  <el-button size="small" type="primary" link @click="copyEntryUrl">复制</el-button>
+                </div>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" @click="saveSecureEntry">保存安全入口设置</el-button>
+                <span class="nx-muted" style="font-size: 12px; margin-left: 8px">
+                  保存后点「重启面板」即生效
+                </span>
               </el-form-item>
             </el-form>
           </div>

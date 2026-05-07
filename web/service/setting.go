@@ -123,6 +123,12 @@ var defaultValueMap = map[string]string{
 	// 这一条来自哪个节点。被某个出站绑定的入站会改用出站名称作为前缀,
 	// 见 ShareService 链接生成。
 	"nodeName": "",
+	// 安全入口:启用后面板只在 webBasePath + secureEntryPath/ 下应答,
+	// 其它路径全部 404 — 端口扫描看不到任何登录界面,显著提升被自动化
+	// 工具发现的门槛。默认关闭,启用前提示用户记下完整 URL,否则改完
+	// 重启自己也进不来。
+	"secureEntryEnabled": "false",
+	"secureEntryPath":    "",
 }
 
 type SettingService struct {
@@ -328,6 +334,26 @@ func (s *SettingService) GetXrayConfigTemplate() (string, error) {
 // 失败时也返回空,share link 流程不应被一次 settings 读取失败拖垮。
 func (s *SettingService) GetNodeName() string {
 	v, err := s.getString("nodeName")
+	if err != nil {
+		return ""
+	}
+	return v
+}
+
+// GetSecureEntryEnabled / GetSecureEntryPath — 安全入口。当 enabled = true 且
+// path 非空时,initRouter 把 path 拼到 webBasePath 后作为生效前缀,
+// 任何不在该前缀下的请求一律 404。失败统一退回"未启用",否则一次 DB
+// 抖动可能把用户彻底锁死在外面。
+func (s *SettingService) GetSecureEntryEnabled() bool {
+	v, err := s.getBool("secureEntryEnabled")
+	if err != nil {
+		return false
+	}
+	return v
+}
+
+func (s *SettingService) GetSecureEntryPath() string {
+	v, err := s.getString("secureEntryPath")
 	if err != nil {
 		return ""
 	}

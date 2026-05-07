@@ -514,6 +514,16 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 安全入口:把 secureEntryPath 拼到 webBasePath 后作为生效前缀。
+	// e.g. webBasePath="/" + secureEntryPath="aBc8d2x9" → "/aBc8d2x9/"
+	// 这条之外的任何路径(包括 "/" 本身)走 NoRoute 一律 404,扫端口
+	// 看到的是裸 404 不再吐 SPA。
+	secureEntryEnabled := s.settingService.GetSecureEntryEnabled()
+	secureEntryPath := strings.TrimSpace(s.settingService.GetSecureEntryPath())
+	if secureEntryEnabled && secureEntryPath != "" {
+		basePath = basePath + secureEntryPath + "/"
+		logger.Info("secure entry enabled, panel base path = ", basePath)
+	}
 	assetsBasePath := basePath + "assets/"
 
 	store := cookie.NewStore(secret)
@@ -617,12 +627,26 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(injected))
 	}
 	engine.GET(basePath, indexHandler)
-	// v2.0 SPA 兜底:面板下任何没匹配到 API/asset 路由的 GET 全部返回
-	// SPA 入口。HEAD 一并兜底。其他方法仍按 405 处理。
+	// v2.0 SPA 兜底:basePath 下任何没匹配到 API/asset 路由的 GET 全部返回
+	// SPA 入口(让 vue-router 接管 history)。HEAD 一并兜底。
+	//
+	// 安全入口启用时,basePath 自带秘密 slug。落在 basePath 之外的请求
+	// (e.g. /、/login、/admin/、/wp-admin/)一律返裸 404 — 扫端口的工具
+	// 看不到任何登录线索,大幅提升发现门槛。这是 secureEntryEnabled 的
+	// 主作用,前置 basePath 改动只是把所有合法路径都迁到 secret slug 下。
 	engine.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
 		if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
-			indexHandler(c)
-			return
+			if strings.HasPrefix(path, basePath) {
+				indexHandler(c)
+				return
+			}
+			// 未启用安全入口时保持旧行为(SPA 兜底任何 GET),避免
+			// 已经把 webBasePath 设成非 "/" 的老用户突然 404。
+			if !secureEntryEnabled {
+				indexHandler(c)
+				return
+			}
 		}
 		c.String(http.StatusNotFound, "not found")
 	})
