@@ -20,7 +20,10 @@ declare global {
   }
 }
 
-const PLACEHOLDER = '__NX_BASE__'
+// 占位符跟变量名 __NX_BASE__ 区分,否则 server 端 ReplaceAll 会把
+// 变量名也替换掉破坏 JS 语法。dev 模式下 index.html 没经过 server 注入,
+// window.__NX_BASE__ 拿到的是字面 "%%NX_BASE%%",我们识别为"没覆盖"退化到 /。
+const PLACEHOLDER = '%%NX_BASE%%'
 
 export function resolveBasePath(): string {
   const raw = (window.__NX_BASE__ ?? '').toString()

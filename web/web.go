@@ -608,7 +608,11 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 			`"`, `\"`,
 			`</`, `<\/`,
 		).Replace(basePath)
-		injected := strings.ReplaceAll(string(data), "__NX_BASE__", safeBase)
+		// 占位符是 %%NX_BASE%%,刻意跟 JS 变量名 window.__NX_BASE__ 区分。
+		// v2.0.5 的故障:占位符跟变量名同名 __NX_BASE__,ReplaceAll 把变量名
+		// 也替换成 basePath,生成 window./ = "/" 这种破 JS 语法 → 全站
+		// SyntaxError。占位符必须跟变量名分离。
+		injected := strings.ReplaceAll(string(data), "%%NX_BASE%%", safeBase)
 		c.Header("Cache-Control", "no-cache")
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(injected))
 	}

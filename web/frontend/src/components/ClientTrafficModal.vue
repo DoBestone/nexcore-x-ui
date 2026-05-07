@@ -285,7 +285,7 @@ onBeforeUnmount(() => {
     :title="`客户端流量 — ${inbound.remark || 'inbound#' + inbound.id}`"
     width="900px"
     class="constrained-dialog"
-    :align-center="false"
+    :align-center="true"
     @close="emit('close', dataChanged)"
     :close-on-click-modal="false"
   >
@@ -360,7 +360,7 @@ onBeforeUnmount(() => {
     </el-table>
 
     <!-- 添加客户端子 dialog -->
-    <el-dialog v-model="addVisible" title="添加客户端" width="480px" append-to-body class="constrained-dialog" :align-center="false">
+    <el-dialog v-model="addVisible" title="添加客户端" width="480px" append-to-body class="constrained-dialog" :align-center="true">
       <el-form label-width="100px" label-position="left">
         <el-form-item label="email">
           <el-input v-model="newEmail" />
@@ -408,7 +408,7 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <!-- 编辑额度 -->
-    <el-dialog v-model="editVisible" title="编辑额度" width="480px" append-to-body class="constrained-dialog" :align-center="false">
+    <el-dialog v-model="editVisible" title="编辑额度" width="480px" append-to-body class="constrained-dialog" :align-center="true">
       <el-form label-width="100px" label-position="left">
         <el-form-item label="email">
           <el-input v-model="editEmail" disabled />

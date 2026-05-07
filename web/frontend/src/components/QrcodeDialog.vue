@@ -70,7 +70,7 @@ async function copy() {
     :title="title || '二维码'"
     width="360px"
     class="constrained-dialog"
-    :align-center="false"
+    :align-center="true"
     :close-on-click-modal="true"
   >
     <div class="qr-wrap">

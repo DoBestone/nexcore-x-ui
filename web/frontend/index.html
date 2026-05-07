@@ -6,12 +6,15 @@
     <meta name="color-scheme" content="light" />
     <!--
       Base path injection.
-      The Go server (web/web.go::indexHandler) replaces __NX_BASE__ with the
+      The Go server (web/web.go::indexHandler) replaces %%NX_BASE%% with the
       panel's actual base path (default "/", or whatever the operator set
       in Settings → BasePath, e.g. "/admin/"). Axios + vue-router both
       pick this up at boot so the same SPA bundle works under any base.
+
+      占位符必须跟变量名 window.__NX_BASE__ 区分开,否则
+      strings.ReplaceAll 会把变量名也替换掉,出 SyntaxError(v2.0.5 故障)。
     -->
-    <script>window.__NX_BASE__ = "__NX_BASE__";</script>
+    <script>window.__NX_BASE__ = "%%NX_BASE%%";</script>
     <title>NexCore X-UI</title>
   </head>
   <body>

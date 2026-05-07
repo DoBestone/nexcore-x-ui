@@ -30,14 +30,14 @@ interface NavItem {
 }
 
 // Panel version surfaced in the side-bar. xray.version is the xray-core
-// build, NOT the panel; panelVersion is the field we added on the
-// server.Status struct so release-cut doesn't have to hand-edit
-// Layout.vue every time. The /xui/server/status route is POST (legacy
-// from vaxilu/x-ui) — post() unwraps {success, msg, obj} for us.
+// build, NOT the panel; panelVersion is 我们在 server.Status 加的字段。
+// /server/status 是 POST(legacy from vaxilu/x-ui),**不在** /xui/ group 下
+// —— ServerController 是顶层挂的(web.go),跟 Dashboard.vue 用的路径一致。
+// post() 自动 unwrap {success, msg, obj}。
 const panelVersion = ref('')
 onMounted(async () => {
   try {
-    const s = await post<ServerStatus & { panelVersion?: string }>('xui/server/status')
+    const s = await post<ServerStatus & { panelVersion?: string }>('server/status')
     if (s?.panelVersion) panelVersion.value = s.panelVersion
   } catch {
     /* server may be down or 401-redirecting; fall back to empty string */

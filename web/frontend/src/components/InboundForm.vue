@@ -35,8 +35,11 @@ const expiryTime = ref<number>(0)
 const _expiryDate = ref<Date | null>(null)
 
 // VLESS / VMess client 通用字段
+// flow 默认空字符串 —— xtls-rprx-vision 必须搭配 Reality 或 TLS,
+// 默认 streamSettings 是 {"network":"tcp"} 没配 TLS,选 vision 会让用户连上
+// 但跑不出网。等用户在 streamSettings 里配好 Reality 再手动选 vision。
 const clientId = ref('')
-const flow = ref('xtls-rprx-vision')
+const flow = ref('')
 const clientEmail = ref('')
 
 // SS 字段
@@ -262,7 +265,7 @@ async function submit() {
     :title="mode === 'add' ? '添加入站' : '编辑入站'"
     width="640px"
     class="constrained-dialog"
-    :align-center="false"
+    :align-center="true"
     @close="emit('close')"
     :close-on-click-modal="false"
   >
