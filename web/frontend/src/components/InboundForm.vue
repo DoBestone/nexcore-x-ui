@@ -305,7 +305,13 @@ async function submit() {
         />
       </el-form-item>
 
-      <!-- VLESS / VMess 共用 client 字段 -->
+      <!-- VLESS / VMess / Trojan / SS-2022 是多用户协议,xray 启动至少需要一个
+           clients[] 条目,所以入站表单顺便带出"首个客户(client #1)"的字段。
+           创建后 modal 里就直接看到这个客户,后续可在 modal "添加客户端"加更多。 -->
+      <el-divider
+        v-if="isMultiUser"
+        content-position="left"
+      >首个客户(client #1) — 入站启动必需</el-divider>
       <template v-if="protocol === 'vless' || protocol === 'vmess'">
         <el-form-item label="UUID">
           <el-input v-model="clientId">
@@ -322,6 +328,9 @@ async function submit() {
         </el-form-item>
         <el-form-item label="email">
           <el-input v-model="clientEmail" placeholder="作为 stats key 全局唯一" />
+          <span class="nx-muted" style="font-size: 12px">
+            该客户的标识,创建后会在客户端列表里出现
+          </span>
         </el-form-item>
       </template>
 

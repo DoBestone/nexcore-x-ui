@@ -146,6 +146,35 @@
 (commit `16c3f42`)。任何 ResponseWriter 包装都要照着这条 checklist 写测试,
 **不要相信"看起来对就行"**。
 
+### Xray stats — user 级流量必须三件套齐全
+
+per-email 流量统计(`client_traffics.up/down`)只有同时满足以下三条才工作:
+
+1. **policy 开 user 级**:`policy.levels.0.statsUserUplink/Downlink = true`
+   (在 `web/service/config.json`)。光开 `system.statsInboundUplink` 是不够的,
+   那只给 inbound 聚合,xray gRPC 不会暴露 per-email 计数器
+2. **trafficRegex 匹配 user 分支**:`xray/process.go` 正则必须包含 `user`,
+   形如 `(inbound|outbound|user)>>>([^>]+)>>>traffic>>>(downlink|uplink)`
+3. **client_traffics 行存在**:`syncEmbeddedClientTraffics` 在 AddInbound /
+   UpdateInbound 时同步,`SyncAllClientTraffics` 启动时兜底老库。否则
+   `AddTrafficByEmail` 收到流量但 UPDATE WHERE email=... RowsAffected=0,
+   流量被悄悄丢
+
+**踩坑历史**:`v1.1.x` 多次出现"入站累计有流量,客户行流量永远 0",原因都
+是上面三条缺一。trafficRegex 是最隐蔽的——policy 给了它会无声忽略 `user>>>`
+key,因为不匹配。
+
+### 在线 IP TTL — access-log-tail 的固有局限
+
+`web/service/online_ip_service.go` 通过 tail xray access.log 抽 `accepted ...
+[tag -> direct] email: foo` 行做在线状态。**只在 connection accept 那一刻
+有日志**,长连接(xtls-rprx-vision 视频/挂代理)建立后没有新行。所以 TTL
+不能太短,否则用户挂着代理 modal 上一直闪"在线/离线"。
+
+当前 5 分钟,够覆盖大多数浏览短连接 + 长流活跃心跳。要"实时准确"得用
+xray `statsservice` query `user>>>email>>>online`,但需要 xray-core 编译
+开关,先不做。
+
 ---
 
 ## 文档索引

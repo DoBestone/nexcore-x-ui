@@ -665,6 +665,13 @@ func (s *Server) initI18n(engine *gin.Engine) error {
 }
 
 func (s *Server) startTask() {
+	// 启动时一次性兜底:把所有 inbound 内嵌的 clients[].email 同步到
+	// client_traffics 表。覆盖 v2.0.0 之前 AddInbound 漏掉的旧 inbound,
+	// 让 modal 客户列表 / 入站卡 badge 永远对上。
+	if err := s.inboundService.SyncAllClientTraffics(); err != nil {
+		logger.Warning("sync embedded client_traffics failed:", err)
+	}
+
 	err := s.xrayService.RestartXray(true)
 	if err != nil {
 		logger.Warning("start xray failed:", err)

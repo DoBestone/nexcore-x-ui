@@ -158,7 +158,56 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) error {
 		}
 	}
 	db := database.GetDB()
-	return db.Save(inbound).Error
+	if err := db.Save(inbound).Error; err != nil {
+		return err
+	}
+	// v1.1.0+ 多用户协议:把 settings.clients[].email 同步到 client_traffics,
+	// 否则 modal 客户列表(读 client_traffics)和入站卡 badge(数 settings.
+	// clients.length)会对不上。原来这步只在 ClientService.AddClient 走
+	// "+ 添加客户端" 那条路时跑,通过"添加入站"表单内嵌的初始 client 一直
+	// 漏掉。inbound 级的 total/expiry/enable 当作初始默认,后续可单独 PATCH。
+	syncEmbeddedClientTraffics(inbound)
+	return nil
+}
+
+// SyncAllClientTraffics 扫描所有 inbound,把 settings.clients[].email 同步
+// 到 client_traffics 表。一次性兜底:升级到带 syncEmbeddedClientTraffics
+// 之前创建的旧 inbound 内嵌 client 没有 client_traffics 行,modal 看不到
+// 它们。startTask() 启动时调一次,后续 AddInbound/UpdateInbound 会自动维护。
+// EnsureRow 是幂等的(写过就 update,没写过就 insert),重复调用零代价。
+func (s *InboundService) SyncAllClientTraffics() error {
+	all, err := s.GetAllInbounds()
+	if err != nil {
+		return err
+	}
+	for _, in := range all {
+		syncEmbeddedClientTraffics(in)
+	}
+	return nil
+}
+
+// syncEmbeddedClientTraffics scans inbound.settings for clients[].email and
+// ensures a client_traffics row exists for each. Idempotent — callable from
+// both AddInbound and UpdateInbound. Email-less protocols (socks/http/dokodemo
+// /SS-legacy) just no-op since their settings don't carry clients[].
+func syncEmbeddedClientTraffics(inbound *model.Inbound) {
+	if inbound == nil || inbound.Settings == "" {
+		return
+	}
+	var s struct {
+		Clients []map[string]any `json:"clients"`
+	}
+	if err := json.Unmarshal([]byte(inbound.Settings), &s); err != nil {
+		return
+	}
+	cts := &ClientTrafficService{}
+	for _, c := range s.Clients {
+		email, _ := c["email"].(string)
+		if email == "" {
+			continue
+		}
+		_ = cts.EnsureRow(inbound.Id, email, inbound.Total, inbound.ExpiryTime, inbound.Enable)
+	}
 }
 
 func (s *InboundService) AddInbounds(inbounds []*model.Inbound) error {
@@ -317,7 +366,13 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 	}
 
 	db := database.GetDB()
-	return db.Save(oldInbound).Error
+	if err := db.Save(oldInbound).Error; err != nil {
+		return err
+	}
+	// 跟 AddInbound 对称:settings.clients[] 变更时同步 client_traffics,
+	// 否则 modal(读 client_traffics)和入站卡 badge(数 clients[])对不上。
+	syncEmbeddedClientTraffics(oldInbound)
+	return nil
 }
 
 func (s *InboundService) AddTraffic(traffics []*xray.Traffic) (err error) {

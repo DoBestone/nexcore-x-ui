@@ -16,8 +16,12 @@ import (
 // 每个 IP 在 onlineIPTTL 时间窗口内无新连接即被移除。运行时数据，不持久化。
 
 const (
-	onlineIPTTL          = 60 * time.Second
-	onlineIPGCInterval   = 10 * time.Second
+	// onlineIPTTL — access.log 只在连接 accept 那一刻有日志行,长连接
+	// (xtls-rprx-vision 看视频/挂代理)建立后没有新行,旧值 60s 让长连接
+	// 用户在 modal 上闪一下就显示离线。5 分钟兼顾"真断线响应"和"长连接
+	// 不闪烁",代价是用户真断线后 5 分钟内 modal 还显示在线。
+	onlineIPTTL          = 5 * time.Minute
+	onlineIPGCInterval   = 30 * time.Second
 	onlineIPTailInterval = 500 * time.Millisecond
 )
 

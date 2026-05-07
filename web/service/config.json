@@ -33,6 +33,12 @@
     "system": {
       "statsInboundDownlink": true,
       "statsInboundUplink": true
+    },
+    "levels": {
+      "0": {
+        "statsUserUplink": true,
+        "statsUserDownlink": true
+      }
     }
   },
   "routing": {

@@ -21,7 +21,14 @@ import (
 	"google.golang.org/grpc"
 )
 
-var trafficRegex = regexp.MustCompile("(inbound|outbound)>>>([^>]+)>>>traffic>>>(downlink|uplink)")
+// inbound/outbound 走 IsInbound 标志位;user 走 email tag,IsInbound=false
+// 时下游(ClientTrafficService.AddTrafficByEmail)按 Tag 匹配 client_traffics。
+// xray stats key 形如:
+//   inbound>>>{tag}>>>traffic>>>{uplink|downlink}
+//   outbound>>>{tag}>>>traffic>>>{uplink|downlink}
+//   user>>>{email}>>>traffic>>>{uplink|downlink}
+// user 级要在 xray policy.levels.0.statsUserUplink/Downlink=true 才有,见 web/service/config.json。
+var trafficRegex = regexp.MustCompile("(inbound|outbound|user)>>>([^>]+)>>>traffic>>>(downlink|uplink)")
 
 func GetBinaryName() string {
 	return fmt.Sprintf("xray-%s-%s", runtime.GOOS, runtime.GOARCH)
@@ -295,23 +302,32 @@ func (p *process) GetTraffic(reset bool) ([]*Traffic, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 用 kind:tag 做 map key:不同 namespace(inbound / outbound / user)
+	// 间 tag 同名(用户给入站起 remark="alice" 又有 email="alice")不会被
+	// 错误合并到同一条 Traffic 上。下游靠 IsInbound 区分入站级和 user 级,
+	// outbound 进了 IsInbound=false 通道,在 AddTrafficByEmail 里按 email
+	// 查不到 client_traffics 行自动跳过,不会污染数据。
 	tagTrafficMap := map[string]*Traffic{}
 	traffics := make([]*Traffic, 0)
 	for _, stat := range resp.GetStat() {
 		matchs := trafficRegex.FindStringSubmatch(stat.Name)
-		isInbound := matchs[1] == "inbound"
+		if len(matchs) != 4 {
+			continue // xray 偶尔会上报非 traffic key,不匹配的安全跳过
+		}
+		kind := matchs[1]
 		tag := matchs[2]
 		isDown := matchs[3] == "downlink"
 		if tag == "api" {
 			continue
 		}
-		traffic, ok := tagTrafficMap[tag]
+		key := kind + ":" + tag
+		traffic, ok := tagTrafficMap[key]
 		if !ok {
 			traffic = &Traffic{
-				IsInbound: isInbound,
+				IsInbound: kind == "inbound",
 				Tag:       tag,
 			}
-			tagTrafficMap[tag] = traffic
+			tagTrafficMap[key] = traffic
 			traffics = append(traffics, traffic)
 		}
 		if isDown {

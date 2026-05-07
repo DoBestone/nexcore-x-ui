@@ -66,6 +66,9 @@ const newEmail = ref('')
 const newId = ref('')
 const newFlow = ref('xtls-rprx-vision')
 const newPassword = ref('')
+const newTotalGB = ref(0)
+const newExpiry = ref<Date | null>(null)
+const newEnable = ref(true)
 const adding = ref(false)
 
 function uuidV4(): string {
@@ -89,6 +92,9 @@ function openAdd() {
   newId.value = uuidV4()
   newFlow.value = 'xtls-rprx-vision'
   newPassword.value = randomPassword(16)
+  newTotalGB.value = 0
+  newExpiry.value = null
+  newEnable.value = true
   addVisible.value = true
 }
 
@@ -120,6 +126,23 @@ async function doAdd() {
       client,
       { headers: { 'Content-Type': 'application/json' } }
     )
+    // 第二步:把额度/到期/启用一次写入 client_traffics。AddClient 那边
+    // 用 inbound 级 total/expiry 兜底建行,这里只在用户显式设过非默认
+    // 值时才打 PATCH(避免无谓 SQL)。
+    const wantTotal = newTotalGB.value > 0
+    const wantExpiry = newExpiry.value !== null
+    const wantDisable = !newEnable.value
+    if (wantTotal || wantExpiry || wantDisable) {
+      await http.post(
+        `xui/api/clients/${encodeURIComponent(newEmail.value)}/limits`,
+        {
+          total: wantTotal ? Math.round(newTotalGB.value * 1024 * 1024 * 1024) : 0,
+          expiryTime: newExpiry.value ? newExpiry.value.getTime() : 0,
+          enable: newEnable.value
+        },
+        { headers: { 'Content-Type': 'application/json' } }
+      )
+    }
     ElMessage.success('已添加客户端')
     addVisible.value = false
     dataChanged = true
@@ -363,6 +386,17 @@ onBeforeUnmount(() => {
             </el-input>
           </el-form-item>
         </template>
+        <el-divider content-position="left">额度(可选)</el-divider>
+        <el-form-item label="流量上限">
+          <el-input-number v-model="newTotalGB" :min="0" :precision="2" />
+          <span class="nx-muted" style="margin-left: 8px">GB,0 = 不限</span>
+        </el-form-item>
+        <el-form-item label="到期时间">
+          <el-date-picker v-model="newExpiry" type="datetime" placeholder="留空 = 永不过期" />
+        </el-form-item>
+        <el-form-item label="启用">
+          <el-switch v-model="newEnable" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="addVisible = false">取消</el-button>
