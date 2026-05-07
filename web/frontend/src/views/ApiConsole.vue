@@ -147,7 +147,7 @@ onMounted(async () => {
       </el-tab-pane>
     </el-tabs>
 
-    <el-dialog v-model="createVisible" title="创建 API token" width="480px" class="constrained-dialog" :align-center="false">
+    <el-dialog v-model="createVisible" title="创建 API token" width="480px" class="constrained-dialog" :align-center="true">
       <div v-if="!issued">
         <el-form label-width="100px" label-position="left">
           <el-form-item label="名称">

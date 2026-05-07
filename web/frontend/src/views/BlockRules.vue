@@ -144,7 +144,7 @@ onMounted(() => reload())
       </el-table>
     </el-card>
 
-    <el-dialog v-model="formVisible" :title="editing.id ? '编辑规则' : '新增规则'" width="520px" class="constrained-dialog" :align-center="false">
+    <el-dialog v-model="formVisible" :title="editing.id ? '编辑规则' : '新增规则'" width="520px" class="constrained-dialog" :align-center="true">
       <el-form label-width="100px" label-position="left">
         <el-form-item label="类型">
           <el-select v-model="editing.type">
@@ -176,7 +176,7 @@ onMounted(() => reload())
       </template>
     </el-dialog>
 
-    <el-dialog v-model="presetVisible" title="应用屏蔽预置" width="480px" class="constrained-dialog" :align-center="false">
+    <el-dialog v-model="presetVisible" title="应用屏蔽预置" width="480px" class="constrained-dialog" :align-center="true">
       <el-form label-width="100px" label-position="left">
         <el-form-item label="预置">
           <el-select v-model="presetKey">

@@ -138,8 +138,20 @@ body {
   max-height: 66vh;
   display: flex;
   flex-direction: column;
-  margin: auto;
   overflow: hidden;
+  /* 注意:不覆盖 margin。让 Element Plus 默认接管两套布局 ——
+   *
+   *   align-center="false"(默认) → EP `.el-dialog` 给 `margin: 15vh auto 50px`,
+   *                                  顶部留白 + 水平居中。
+   *   align-center="true"          → EP `.el-dialog.is-align-center` 给
+   *                                  `margin: auto`,在已变 flex 的 overlay
+   *                                  里纵横都居中。
+   *
+   * 早先 v2.0.6 / v2.0.7 在这里写 `margin: 0 auto` / `margin: auto`,前者
+   * 把 align-center=true 模式下的 EP `is-align-center` 鬼祟覆盖成顶 0
+   * (任何 .constrained-dialog 都贴顶);后者反过来 align-center=false 模式
+   * 下因为父容器不是 flex,垂直 auto 退化成 0,同样贴顶。两边都吃过亏 ——
+   * 干脆这层不管 margin,EP 自己分情况处理。 */
 }
 .el-overlay-dialog .el-dialog.constrained-dialog .el-dialog__header {
   flex: 0 0 auto;
