@@ -38,8 +38,16 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url))
     }
   },
-  // history-mode router — assets 必须用绝对路径,SPA 在 / 下挂载
-  base: '/',
+  // 动态 base:Vite 的 __vitePreload 会用 new URL(dep, location.origin) 拼
+  // 完整路径。如果 base='/' 那 dep 是 "assets/foo.js",resolve 时 origin
+  // 把路径前缀全丢掉 → 永远走 /assets/...,跟运行时 webBasePath / 安全入口
+  // slug 的真实前缀对不上,导致动态加载的 chunk 全部 404。
+  //
+  // 解法:base 设成 /__NX_BASE__/ 占位 token,Vite 把它烧进 mapDeps 数组
+  // 和 HTML link/script。Go 服务侧 indexHandler / StaticFS 出 HTML/JS/CSS
+  // 时做 strings.ReplaceAll 把 token 换成真实 basePath。token 选了既不撞
+  // 合法 URL 字符也不撞 Vite 内部正则的形态。
+  base: '/__NX_BASE__/',
   build: {
     outDir: 'dist',
     emptyOutDir: true,

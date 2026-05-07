@@ -623,6 +623,15 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 		// 也替换成 basePath,生成 window./ = "/" 这种破 JS 语法 → 全站
 		// SyntaxError。占位符必须跟变量名分离。
 		injected := strings.ReplaceAll(string(data), "%%NX_BASE%%", safeBase)
+		// Vite 编译产物把 asset 路径写死成绝对路径(`/assets/foo.js`),
+		// 安全入口启用后 basePath 变成 `/<slug>/`,这些绝对路径绕开 slug
+		// 直接打到 root → NoRoute 一律 404。这里在 HTML 出门前把 src/href
+		// 的 `/assets/` 前缀替换成 `<basePath>assets/`。basePath 已经
+		// trailing `/`,所以拼出来仍然只一个斜杠。basePath = `/`(即未启用
+		// 安全入口)时替换是 no-op,跟旧行为一致。
+		if basePath != "/" {
+			injected = strings.ReplaceAll(injected, `="/assets/`, `="`+basePath+`assets/`)
+		}
 		c.Header("Cache-Control", "no-cache")
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(injected))
 	}

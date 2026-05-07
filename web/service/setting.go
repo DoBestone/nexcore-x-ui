@@ -32,6 +32,7 @@ var sensitiveSettingKeys = map[string]bool{
 	"apiToken":            true, // legacy single-token (multi-token table is hashed)
 	"tgBotToken":          true, // Telegram bot token, can post to operator chat
 	"onlineWebhookSecret": true, // HMAC key signing webhook bodies sent to ops backend
+	"cfApiToken":          true, // Cloudflare API token, can edit DNS for any zone it scopes
 }
 
 // settingCache holds an in-memory copy of every setting row keyed by
@@ -129,6 +130,16 @@ var defaultValueMap = map[string]string{
 	// 重启自己也进不来。
 	"secureEntryEnabled": "false",
 	"secureEntryPath":    "",
+	// 分享链接里写的节点地址。空 = 用浏览器访问面板的 Host(老行为)。
+	// CF 橙云代理场景:面板挂在 example.com(CF 代理 80/443),但 xray
+	// 跑在 10000 这种端口,CF 不代理 → 客户端连超时。把 nodeAddress 设成
+	// 直连 IP 或者另一个 DNS-only 子域,分享链接里走那条路。
+	"nodeAddress": "",
+	// CF API token(Zone:DNS:Edit 权限),用于:
+	//   - 域名绑定 DNS-01 模式取证书 / 续费
+	//   - 面板内一键切换橙云/灰云(代理状态)
+	// 加密存(走 sensitiveSettingKeys),前端只能写不能回读。
+	"cfApiToken": "",
 }
 
 type SettingService struct {
@@ -203,6 +214,21 @@ func (s *SettingService) GetAllSetting() (*entity.AllSetting, error) {
 		err := setSetting(key, value)
 		if err != nil {
 			return nil, err
+		}
+	}
+
+	// 安全:加密 token 类字段不回传明文 — 哪怕 panel session 已认证,
+	// 浏览器内存 / Network 面板 / response 缓存都可能拿到;前端表单组件
+	// 应该显示成"已配置"或空 password input,用户不输入就保留旧值
+	// (UpdateAllSetting 里 skipIfEmptyKeys 兜了这条语义)。
+	for key := range skipIfEmptyKeys {
+		for _, f := range fields {
+			if f.Tag.Get("json") == key {
+				if fv := v.FieldByName(f.Name); fv.Kind() == reflect.String {
+					fv.SetString("")
+				}
+				break
+			}
 		}
 	}
 
@@ -360,6 +386,30 @@ func (s *SettingService) GetSecureEntryPath() string {
 	return v
 }
 
+// GetNodeAddress 返回操作员配置的"节点地址"(分享链接里写的 host)。
+// 空字符串 = 退回到浏览器访问面板的 Host。CF 橙云 + 面板域名场景下这是
+// "客户端连得通"的关键 — CF 不代理 xray 跑的非标端口,链接 host 必须
+// 指向直连 origin 才行。
+func (s *SettingService) GetNodeAddress() string {
+	v, err := s.getString("nodeAddress")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+// GetCfApiToken 返回明文 CF API token(setString/getString 自动解密)。
+// 仅服务侧使用 — 前端 AllSetting 字段是 string 但保存时如果传空字符串
+// 会被忽略(避免回读时拿到空字符串导致前端"误清"),只有显式给非空才覆盖。
+// 详见 SettingController.update 的清洗逻辑。
+func (s *SettingService) GetCfApiToken() string {
+	v, err := s.getString("cfApiToken")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
 func (s *SettingService) GetListen() (string, error) {
 	return s.getString("webListen")
 }
@@ -514,6 +564,15 @@ func (s *SettingService) GetTimeLocation() (*time.Location, error) {
 	return location, nil
 }
 
+// skipIfEmptyKeys 是"前端不回读、空值视作未改"的设置 key 集合 — 主要是
+// 各种 token / secret。表单 password input 默认显示空 placeholder,用户
+// 不输入就提交时,不应该把 DB 里存好的 token 清空。
+var skipIfEmptyKeys = map[string]bool{
+	"tgBotToken":          true,
+	"onlineWebhookSecret": true,
+	"cfApiToken":          true,
+}
+
 func (s *SettingService) UpdateAllSetting(allSetting *entity.AllSetting) error {
 	if err := allSetting.CheckValid(); err != nil {
 		return err
@@ -527,6 +586,9 @@ func (s *SettingService) UpdateAllSetting(allSetting *entity.AllSetting) error {
 		key := field.Tag.Get("json")
 		fieldV := v.FieldByName(field.Name)
 		value := fmt.Sprint(fieldV.Interface())
+		if skipIfEmptyKeys[key] && strings.TrimSpace(value) == "" {
+			continue
+		}
 		err := s.saveSetting(key, value)
 		if err != nil {
 			errs = append(errs, err)

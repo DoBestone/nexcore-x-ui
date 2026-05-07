@@ -42,6 +42,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '出站配置', icon: 'Promotion' }
       },
       {
+        path: 'domains',
+        name: 'domains',
+        component: () => import('@/views/Domains.vue'),
+        meta: { title: '域名绑定', icon: 'Lock' }
+      },
+      {
         path: 'block-rules',
         name: 'block-rules',
         component: () => import('@/views/BlockRules.vue'),

@@ -232,6 +232,32 @@ onMounted(() => {
                   分享链接的 ps 字段;入站绑了出站时改用该出站的名称作为前缀。
                 </span>
               </el-form-item>
+              <el-form-item label="节点地址">
+                <el-input
+                  v-model="all.nodeAddress"
+                  placeholder="如:1.2.3.4 或 node1.example.com (留空 = 跟面板访问域名)"
+                />
+                <span class="nx-muted" style="font-size: 12px">
+                  分享链接里写的 host。Cloudflare 橙云代理 + 域名访问面板时
+                  <strong>必须显式配</strong> —— 否则链接 host 是 CF 代理域,
+                  客户端打 xray 的非标端口被 CF 丢弃造成连接超时。一般填
+                  origin 直连 IP,或者另一个 DNS-only 子域(灰云)指向 origin。
+                </span>
+              </el-form-item>
+              <el-form-item label="CF API Token">
+                <el-input
+                  v-model="all.cfApiToken"
+                  type="password"
+                  show-password
+                  placeholder="留空 = 不修改(已存的不会被清掉)"
+                />
+                <span class="nx-muted" style="font-size: 12px">
+                  Zone:DNS:Edit 权限,在
+                  <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank">CF Profile → API Tokens</a>
+                  生成。用于域名绑定 DNS-01 取证书 + 一键切橙云灰云。
+                  服务侧 AES-GCM 加密存储,前端不回读明文,你看到空就是没改。
+                </span>
+              </el-form-item>
               <el-form-item>
                 <el-button type="primary" :loading="saving" @click="save">保存</el-button>
                 <el-button type="danger" plain @click="restart">重启面板</el-button>

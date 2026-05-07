@@ -36,6 +36,7 @@ type APIPanelController struct {
 	inboundService       service.InboundService
 	shareService         service.ShareService
 	firewallService      service.FirewallService
+	settingService       service.SettingService
 }
 
 func NewAPIPanelController(g *gin.RouterGroup) *APIPanelController {
@@ -379,12 +380,20 @@ func (a *APIPanelController) onlineIPsByEmail(c *gin.Context) {
 // panel 路径剩下的就只是纯白名单决策。
 func (a *APIPanelController) inboundLinks(c *gin.Context) {
 	id := int(getUriId(c))
+	// host 优先级:
+	//   1. ?host=  显式覆盖(给业务系统拼跨节点订阅用)
+	//   2. settings.nodeAddress  操作员配的节点地址 — CF 橙云场景必须用,
+	//      否则链接 host 是面板的 CF 代理域,客户端打非标端口超时
+	//   3. c.Request.Host  老行为兜底,兼容没配 nodeAddress 的旧部署
 	host := strings.TrimSpace(c.Query("host"))
 	if host == "" {
+		host = a.settingService.GetNodeAddress()
+	}
+	if host == "" {
 		host = c.Request.Host
-		if i := strings.IndexByte(host, ':'); i >= 0 {
-			host = host[:i]
-		}
+	}
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
 	}
 	cleaned, reason := service.ValidateShareHostSyntactic(host)
 	if reason != "" {

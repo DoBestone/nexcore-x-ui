@@ -25,6 +25,10 @@ func NewServerController(g *gin.RouterGroup) *ServerController {
 	}
 	a.initRouter(g)
 	a.startTask()
+	// 同步算一份初始 status,免得"刚重启 + Dashboard 立刻轮询"那 2s 空窗
+	// 拿到 obj:null。之前是等 cron @every 2s 第一拍才填充,启用安全入口
+	// 后用户 100% 会经历这个流程(改 setting → 重启 → 进面板)。
+	a.refreshStatus()
 	return a
 }
 
@@ -55,7 +59,11 @@ func (a *ServerController) startTask() {
 
 func (a *ServerController) status(c *gin.Context) {
 	a.lastGetStatusTime = time.Now()
-
+	// 兜底:无论什么原因 lastStatus 是 nil(竞态 / 服务过早调用),
+	// 同步算一份,避免前端拿到 obj:null 整张 Dashboard 卡住不显示。
+	if a.lastStatus == nil {
+		a.refreshStatus()
+	}
 	jsonObj(c, a.lastStatus, nil)
 }
 

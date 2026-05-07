@@ -81,6 +81,15 @@ export interface AllSetting {
   // 启用前必须先填 path,否则保存会被后端拒掉(避免改完自己进不来)。
   secureEntryEnabled: boolean
   secureEntryPath: string
+
+  // 节点地址:分享链接里写的 host。空 = 跟着浏览器访问面板的域名走。
+  // CF 橙云代理时必须显式配,否则链接打到 CF 代理上的非标端口超时。
+  nodeAddress: string
+
+  // CF API token(Zone:DNS:Edit)。前端 password input,后端加密存。
+  // GetAllSetting 返空字符串(不回读明文),空提交 = 不修改(由 setting
+  // 服务的 skipIfEmptyKeys 兜)。仅 password 控件用。
+  cfApiToken: string
 }
 
 // 出站服务器 — 用户配置的中转节点。Inbound 通过 outboundTag 字段关联。

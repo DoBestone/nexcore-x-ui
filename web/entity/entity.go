@@ -53,6 +53,16 @@ type AllSetting struct {
 	// 看到的是裸 404。default off,启用要二次确认 + 提示新 URL。
 	SecureEntryEnabled bool   `json:"secureEntryEnabled" form:"secureEntryEnabled"`
 	SecureEntryPath    string `json:"secureEntryPath" form:"secureEntryPath"`
+
+	// 节点地址:分享链接里写的 host。空 = 用浏览器访问面板的域名/IP。
+	// CF 橙云代理 + 域名访问面板场景必须显式配 — 否则链接 host 落到
+	// CF 代理域,客户端打 xray 跑的非标端口直接超时。
+	NodeAddress string `json:"nodeAddress" form:"nodeAddress"`
+
+	// CF API token(Zone:DNS:Edit)。前端展示用 password input,提交时空
+	// 字符串视作"不变"(避免回读时把存好的 token 误清)。复用于 DNS-01
+	// 取证书 + 一键切换橙云/灰云。
+	CfApiToken string `json:"cfApiToken" form:"cfApiToken"`
 }
 
 func (s *AllSetting) CheckValid() error {

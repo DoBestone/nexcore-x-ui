@@ -7,6 +7,7 @@ import {
   Connection,
   Promotion,
   Lock,
+  Link,
   Document,
   Setting,
   User,
@@ -49,6 +50,7 @@ const nav: NavItem[] = [
   { path: '/dashboard', title: '系统状态', icon: Odometer },
   { path: '/inbounds', title: '入站列表', icon: Connection },
   { path: '/outbounds', title: '出站配置', icon: Promotion },
+  { path: '/domains', title: '域名绑定', icon: Link },
   { path: '/block-rules', title: '屏蔽规则', icon: Lock },
   { path: '/api-console', title: 'API 控制台', icon: Document },
   { path: '/settings', title: '面板设置', icon: Setting }
