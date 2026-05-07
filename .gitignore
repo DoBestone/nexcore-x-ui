@@ -28,6 +28,9 @@ bin/xray-linux-*
 bin/xray-windows-*
 bin/geoip.dat
 bin/geosite.dat
+# xray runtime access / error logs (启动后 xray 自己写,不进 git)
+bin/access.log
+bin/error.log
 
 # editor / OS
 .idea/

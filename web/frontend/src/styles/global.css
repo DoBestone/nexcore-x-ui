@@ -93,11 +93,24 @@ body {
   font-size: 12.5px;
 }
 
-/* el-card 与全局风格统一 */
+/* el-card 与全局风格统一
+ *
+ * EP 默认 shadow="always" 会给 .el-card.is-always-shadow 上一条
+ * box-shadow:var(--el-box-shadow-light)。早先实现用 3 个 !important
+ * 强压,既污染又显得脏。这里改干净:
+ *   - border / border-radius 走 EP 自己暴露的 --el-card-* 变量,放在
+ *     `.el-card` 选择器上变量值就被覆盖,无须 !important。
+ *   - box-shadow 没有变量,用同级 specificity 的状态选择器精准盖掉
+ *     is-always-shadow / is-hover-shadow:hover,避免 !important。
+ */
 .el-card {
-  border: none !important;
-  box-shadow: var(--nx-shadow) !important;
-  border-radius: var(--nx-radius) !important;
+  --el-card-border-color: transparent;
+  --el-card-border-radius: var(--nx-radius);
+}
+.el-card.is-always-shadow,
+.el-card.is-hover-shadow:hover,
+.el-card.is-hover-shadow:focus {
+  box-shadow: var(--nx-shadow);
 }
 
 .el-button + .el-button {
@@ -125,7 +138,7 @@ body {
   max-height: 66vh;
   display: flex;
   flex-direction: column;
-  margin: 0 auto;
+  margin: auto;
   overflow: hidden;
 }
 .el-overlay-dialog .el-dialog.constrained-dialog .el-dialog__header {

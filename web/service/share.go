@@ -117,13 +117,29 @@ func (s *ShareService) linksForLoadedInbound(in *model.Inbound, host string) ([]
 			}
 		}
 	case model.Shadowsocks:
-		// Single-key SS: settings has password+method directly.
+		// Two shapes share this protocol:
+		//   1) legacy / SS-2022 single-user: settings 顶层 method+password,
+		//      clients[] 不存在或为空,产物只有 1 条 inbound 级别的链接。
+		//   2) SS-2022 multi-user (method 以 2022-blake3- 开头,clients[] 非空):
+		//      每个 client 有自己的 password,链接的 userinfo 是
+		//      method:server_psk:user_psk —— 早先这里只发 1 条服务器侧 PSK
+		//      链接,客户端拿去根本无法鉴权,等于把订阅废了。
 		settings := map[string]any{}
 		_ = json.Unmarshal([]byte(in.Settings), &settings)
 		method, _ := settings["method"].(string)
-		password, _ := settings["password"].(string)
-		if method != "" && password != "" {
-			out = append(out, buildSSLink(in, host, method, password))
+		serverPSK, _ := settings["password"].(string)
+		switch {
+		case strings.HasPrefix(method, "2022-blake3-") && len(clients) > 0:
+			for _, c := range clients {
+				email, _ := c["email"].(string)
+				userPSK, _ := c["password"].(string)
+				if email == "" || userPSK == "" {
+					continue
+				}
+				out = append(out, buildSS2022UserLink(in, host, method, serverPSK, userPSK, email))
+			}
+		case method != "" && serverPSK != "":
+			out = append(out, buildSSLink(in, host, method, serverPSK))
 		}
 	default:
 		return nil, ErrUnsupportedProtocol
@@ -135,11 +151,18 @@ func (s *ShareService) linksForLoadedInbound(in *model.Inbound, host string) ([]
 // 客户端流量 modal 行内"二维码"按钮调它:面板根据当前 email 行从 map
 // 取一条链接喂给 qrModal,不需要额外 query 参数。SS-legacy 这种没 email
 // 的协议天然不出现在 map 里(本来 modal 也不展示)。
+//
+// DB 入口 + 纯计算分开:测试和 SubscriptionForAll-style 已加载场景都能
+// 直接调 linksByEmailFromLoadedInbound 而不需要 mock InboundService。
 func (s *ShareService) LinksByEmail(inboundID int, host string) (map[string]string, error) {
 	in, err := s.inboundService.GetInbound(inboundID)
 	if err != nil {
 		return nil, err
 	}
+	return s.linksByEmailFromLoadedInbound(in, host)
+}
+
+func (s *ShareService) linksByEmailFromLoadedInbound(in *model.Inbound, host string) (map[string]string, error) {
 	clients, _, err := readClients(in)
 	if err != nil {
 		return nil, err
@@ -147,6 +170,12 @@ func (s *ShareService) LinksByEmail(inboundID int, host string) (map[string]stri
 	stream := map[string]any{}
 	if in.StreamSettings != "" {
 		_ = json.Unmarshal([]byte(in.StreamSettings), &stream)
+	}
+	// SS-2022 multi-user 走 settings 顶层 method + server psk;只在 SS 入站
+	// 才需要解一次,提到循环外避免每个 client 重复 parse。
+	ssSettings := map[string]any{}
+	if in.Protocol == model.Shadowsocks && in.Settings != "" {
+		_ = json.Unmarshal([]byte(in.Settings), &ssSettings)
 	}
 	out := make(map[string]string, len(clients))
 	for _, c := range clients {
@@ -162,6 +191,20 @@ func (s *ShareService) LinksByEmail(inboundID int, host string) (map[string]stri
 			link = buildVLESSLink(in, host, c, stream)
 		case model.Trojan:
 			link = buildTrojanLink(in, host, c, stream)
+		case model.Shadowsocks:
+			// Only SS-2022 multi-user has per-email clients with their own
+			// passwords. Legacy SS doesn't carry clients[]/email at all,
+			// so it never reaches here (the loop body skips empty email).
+			method, _ := ssSettings["method"].(string)
+			if !strings.HasPrefix(method, "2022-blake3-") {
+				break
+			}
+			serverPSK, _ := ssSettings["password"].(string)
+			userPSK, _ := c["password"].(string)
+			if userPSK == "" {
+				break
+			}
+			link = buildSS2022UserLink(in, host, method, serverPSK, userPSK, email)
 		}
 		if link != "" {
 			out[email] = link
@@ -274,6 +317,18 @@ func buildSSLink(in *model.Inbound, host string, method, password string) string
 	userInfo := base64.URLEncoding.EncodeToString([]byte(method + ":" + password))
 	remark := url.PathEscape(in.Remark)
 	return fmt.Sprintf("ss://%s@%s:%d#%s", userInfo, host, in.Port, remark)
+}
+
+// buildSS2022UserLink 给 SS-2022 multi-user 模式生成单个 email 客户端的
+// 分享链接。userinfo 段是 method:server_psk:user_psk(冒号分隔三段后整体
+// base64-url),tag 用 email 方便客户端识别。
+//
+// 这是与 buildSSLink 的关键区别:legacy / 单用户 SS 只有 method:password
+// 两段;多用户协议必须把服务端 psk 和用户 psk 都带上,客户端才能 derive
+// 出正确的会话密钥。
+func buildSS2022UserLink(in *model.Inbound, host string, method, serverPSK, userPSK, email string) string {
+	userInfo := base64.URLEncoding.EncodeToString([]byte(method + ":" + serverPSK + ":" + userPSK))
+	return fmt.Sprintf("ss://%s@%s:%d#%s", userInfo, host, in.Port, url.PathEscape(email))
 }
 
 // ---------- helpers ----------
