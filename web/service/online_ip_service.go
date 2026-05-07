@@ -25,13 +25,31 @@ const (
 	onlineIPTailInterval = 500 * time.Millisecond
 )
 
-// 匹配 Xray access log 中的连接接受行。示例:
-//   2024/12/15 10:23:45 from 1.2.3.4:12345 accepted tcp:example.com:443 [inbound-12345 -> direct] email: foo
-//   2024/12/15 10:23:45 from [2001:db8::1]:12345 accepted udp:... [inbound-12345 -> direct]
-var accessLogRegex = regexp.MustCompile(`from\s+(\[[0-9a-fA-F:]+\]|\d+\.\d+\.\d+\.\d+):\d+\s+accepted\s+\S+\s+\[([^\s\]]+)\s+->`)
+// 匹配 Xray access log 中的连接接受行。xray 不同 inbound 类型写出的格式
+// 不一致,典型两族:
+//
+//   A) vmess / vless / trojan 等"完整"格式(带 tcp:/udp: 前缀 + tag 段):
+//      2024/12/15 10:23:45 from 1.2.3.4:12345 accepted tcp:example.com:443 [inbound-12345 -> direct] email: foo
+//      2024/12/15 10:23:45 from [2001:db8::1]:12345 accepted udp:... [inbound-12345 -> direct]
+//
+//   B) shadowsocks-2022 multi-user "精简"格式(无 tcp:/udp: 前缀,无 [tag -> outbound]):
+//      2026/05/07 14:12:07.584524 from 39.144.187.172:61117 accepted 194.221.250.50:80 email: user-645802
+//
+// 早先实现把 IP / tag 同捆在 accessLogRegex 一条正则里硬要求 [tag -> ...],
+// SS-2022 行直接 match 失败,handleLine 提前 return,recordEmail 永远不被
+// 调到 → 客户端流量 modal 显示"离线",但流量在跑。拆成"IP 必抓 / tag
+// 可选 / email 单独抓"三层后两族都 cover。
+var ipRegex = regexp.MustCompile(`from\s+(\[[0-9a-fA-F:]+\]|\d+\.\d+\.\d+\.\d+):\d+\s+accepted\b`)
 
-// emailRegex — xray access.log 在 [tag -> outbound] 之后会跟 ` email: foo`,
-// 客户级聚合靠它。无 email 的连接(socks/http/sniffing-only)跳过。
+// tagRegex — 仅 A 族 inbound(VLESS / VMess / Trojan / SS-legacy)写 tag 段。
+// SS-2022 没有 → 走 nil branch,inbound 级在线数会少 SS 用户,但模态框
+// 客户级路径(走 byEmail)仍然准。后续有需要可以加 email→inbound 的
+// 反查表把 SS-2022 也补到 inbound 级 state map 里。
+var tagRegex = regexp.MustCompile(`\[([^\s\]]+)\s+->\s+[^\s\]]+\]`)
+
+// emailRegex — A 族在 [tag -> outbound] 之后跟 ` email: foo`,B 族(SS-2022)
+// 在 dest:port 之后直接跟 ` email: user-xxx`。无 email 的连接(socks/http/
+// 嗅探流量、API 入站 -> api outbound)跳过。
 var emailRegex = regexp.MustCompile(`email:\s*(\S+)`)
 
 type OnlineIPService struct {
@@ -309,21 +327,30 @@ func (s *OnlineIPService) tailLoop() {
 }
 
 func (s *OnlineIPService) handleLine(line string) {
-	m := accessLogRegex.FindStringSubmatch(line)
-	if m == nil {
+	// 第一关:能不能找到 source IP。找不到说明这行根本不是 accept 行
+	// (Warning / Info / 其它),直接丢。
+	ipMatch := ipRegex.FindStringSubmatch(line)
+	if ipMatch == nil {
 		return
 	}
-	ip := m[1]
+	ip := ipMatch[1]
 	if len(ip) >= 2 && ip[0] == '[' {
 		ip = ip[1 : len(ip)-1]
 	}
-	tag := m[2]
-	if tag == "" || tag == "api" {
-		return
+
+	// 第二关:有 [tag -> outbound] 就按 inbound tag 维度记一条;没有
+	// (SS-2022)/或 tag 是 "api"(面板自身的 dokodemo 内部连接)跳过
+	// inbound-tag 路径,但仍然走 email 路径。这一拆是 v2.0.10 修 SS-2022
+	// "在线但显示离线"的核心:之前两条信息一捆,SS 行没 tag 直接整条丢。
+	if tagMatch := tagRegex.FindStringSubmatch(line); len(tagMatch) > 1 {
+		if tag := tagMatch[1]; tag != "" && tag != "api" {
+			s.record(tag, ip)
+		}
 	}
-	s.record(tag, ip)
-	// 顺手抽 email — 多用户客户级在线 IP 走这条。无 email(socks/http
-	// 等单 password 协议、嗅探流量)只走 inbound 级 record。
+
+	// 第三关:email 永远独立尝试。多用户协议(VLESS / VMess / Trojan /
+	// SS-2022)都会写 email,客户端流量 modal "在线 IP" 列就靠它。无
+	// email 的连接(socks/http/嗅探/API)跳过。
 	if em := emailRegex.FindStringSubmatch(line); len(em) > 1 {
 		s.recordEmail(em[1], ip)
 	}
