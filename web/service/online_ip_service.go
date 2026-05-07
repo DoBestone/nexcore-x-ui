@@ -2,12 +2,15 @@ package service
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
 	"os"
 	"regexp"
 	"sync"
 	"time"
 
+	"nexcore-x-ui/database"
+	"nexcore-x-ui/database/model"
 	"nexcore-x-ui/logger"
 	"nexcore-x-ui/xray"
 )
@@ -56,8 +59,14 @@ type OnlineIPService struct {
 	mu      sync.RWMutex
 	state   map[string]map[string]time.Time // tag   -> ip -> lastSeen
 	byEmail map[string]map[string]time.Time // email -> ip -> lastSeen (v1.1.3)
-	started bool
-	resetCh chan struct{}
+	// emailToTag — settings.clients[].email → inbound tag 的反查表。仅用
+	// 来给 access.log 行里没写 [tag -> outbound] 的协议(SS-2022)补 inbound
+	// 维度计数,让入站卡片"在线人数"角标能涵盖 SS-2022 客户端。OnXrayRestart
+	// 后从 DB 重建一次,中间靠不变就一直对。新建 inbound / 改 inbound
+	// 都会触发 xray 重启(needRestart cron),反查表跟着同步。
+	emailToTag map[string]string
+	started    bool
+	resetCh    chan struct{}
 }
 
 var (
@@ -68,9 +77,10 @@ var (
 func GetOnlineIPService() *OnlineIPService {
 	onlineIPSvcOnce.Do(func() {
 		onlineIPSvc = &OnlineIPService{
-			state:   make(map[string]map[string]time.Time),
-			byEmail: make(map[string]map[string]time.Time),
-			resetCh: make(chan struct{}, 1),
+			state:      make(map[string]map[string]time.Time),
+			byEmail:    make(map[string]map[string]time.Time),
+			emailToTag: make(map[string]string),
+			resetCh:    make(chan struct{}, 1),
 		}
 	})
 	return onlineIPSvc
@@ -120,14 +130,54 @@ func (s *OnlineIPService) truncateLoop() {
 // OnXrayRestart 重置内存状态，并通知 tailer 重新打开日志文件
 // （Xray 重启会重新创建 access.log）。
 func (s *OnlineIPService) OnXrayRestart() {
+	// 同步刷一遍 emailToTag —— xray 重启往往是因为新建 / 改了 inbound,
+	// 反查表必须跟上。在锁外查 DB 避免长时间持锁;查回来再上锁覆盖。
+	freshEmailToTag := loadEmailToTagFromDB()
 	s.mu.Lock()
 	s.state = make(map[string]map[string]time.Time)
 	s.byEmail = make(map[string]map[string]time.Time)
+	s.emailToTag = freshEmailToTag
 	s.mu.Unlock()
 	select {
 	case s.resetCh <- struct{}{}:
 	default:
 	}
+}
+
+// loadEmailToTagFromDB 扫一遍 inbounds 表,提取 settings.clients[].email →
+// inbound.Tag 映射。SS-2022 因为 access.log 没 tag 段,inbound 维度计数
+// 必须靠这条反查兜底。读不到 DB(测试 / boot 早期)就返空 map,handleLine
+// 那边 lookup 拿不到也只是退回原行为,不阻塞。
+func loadEmailToTagFromDB() map[string]string {
+	out := make(map[string]string)
+	db := database.GetDB()
+	if db == nil {
+		return out
+	}
+	var inbounds []*model.Inbound
+	if err := db.Model(&model.Inbound{}).Find(&inbounds).Error; err != nil {
+		logger.Warning("loadEmailToTagFromDB: ", err)
+		return out
+	}
+	for _, in := range inbounds {
+		if in.Tag == "" || in.Settings == "" {
+			continue
+		}
+		var parsed struct {
+			Clients []map[string]any `json:"clients"`
+		}
+		if err := json.Unmarshal([]byte(in.Settings), &parsed); err != nil {
+			continue
+		}
+		for _, c := range parsed.Clients {
+			email, _ := c["email"].(string)
+			if email == "" {
+				continue
+			}
+			out[email] = in.Tag
+		}
+	}
+	return out
 }
 
 func (s *OnlineIPService) record(tag, ip string) {
@@ -342,9 +392,11 @@ func (s *OnlineIPService) handleLine(line string) {
 	// (SS-2022)/或 tag 是 "api"(面板自身的 dokodemo 内部连接)跳过
 	// inbound-tag 路径,但仍然走 email 路径。这一拆是 v2.0.10 修 SS-2022
 	// "在线但显示离线"的核心:之前两条信息一捆,SS 行没 tag 直接整条丢。
+	tagFromLine := ""
 	if tagMatch := tagRegex.FindStringSubmatch(line); len(tagMatch) > 1 {
-		if tag := tagMatch[1]; tag != "" && tag != "api" {
-			s.record(tag, ip)
+		tagFromLine = tagMatch[1]
+		if tagFromLine != "" && tagFromLine != "api" {
+			s.record(tagFromLine, ip)
 		}
 	}
 
@@ -352,7 +404,22 @@ func (s *OnlineIPService) handleLine(line string) {
 	// SS-2022)都会写 email,客户端流量 modal "在线 IP" 列就靠它。无
 	// email 的连接(socks/http/嗅探/API)跳过。
 	if em := emailRegex.FindStringSubmatch(line); len(em) > 1 {
-		s.recordEmail(em[1], ip)
+		email := em[1]
+		s.recordEmail(email, ip)
+
+		// v2.0.11 — SS-2022 这种 access.log 不带 [tag -> outbound] 的协议,
+		// 上一关 tagFromLine 一直是空,入站卡角标计数永远 0。这里用
+		// emailToTag 反查表补出 inbound tag,把这条连接也记到 state 维度,
+		// 角标就能涵盖 SS-2022 客户端。tagFromLine 已经从行里抓到的话不
+		// 重复记(行里写的 tag 是权威源)。
+		if tagFromLine == "" {
+			s.mu.RLock()
+			mapped := s.emailToTag[email]
+			s.mu.RUnlock()
+			if mapped != "" && mapped != "api" {
+				s.record(mapped, ip)
+			}
+		}
 	}
 }
 
