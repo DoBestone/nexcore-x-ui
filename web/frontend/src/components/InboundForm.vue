@@ -8,21 +8,19 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { postForm } from '@/api/http'
-import type { DBInbound } from '@/api/types'
+import type { DBInbound, ClientStub } from '@/api/types'
 
 const props = defineProps<{
   mode: 'add' | 'edit'
   inbound: DBInbound | null
+  // 已占用端口列表 — 父组件从当前入站列表里抽出来传过来。add 模式下
+  // 用它挑一个空闲端口,避免新建入站默认 10000 跟现有入站撞。
+  // 不传 = 退化到 10000(老调用方兼容)。
+  usedPorts?: number[]
 }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'saved'): void }>()
 
-interface ClientStub {
-  id?: string
-  password?: string
-  email?: string
-  flow?: string
-  alterId?: number
-}
+// ClientStub moved to api/types.ts so it's reusable.
 
 const visible = ref(true)
 const saving = ref(false)
@@ -125,7 +123,20 @@ function init() {
   } else {
     regenSecrets()
     clientEmail.value = `user-${Date.now().toString().slice(-6)}`
+    port.value = pickFreePort()
   }
+}
+
+// 从 10000 起向上扫,找第一个不在 usedPorts 里的端口。10000-10999 全占
+// 的话回退到一个 11000-65000 之间的随机端口。65535 是 TCP 上限,但 1024 以下
+// 的特权端口用户大概率不会主动选,起步就放 10000 兼顾"好记"+ "不撞典型 dev 服务"。
+function pickFreePort(): number {
+  const used = new Set(props.usedPorts || [])
+  for (let p = 10000; p < 11000; p++) {
+    if (!used.has(p)) return p
+  }
+  // 10000-10999 全占了(几乎不可能):随机扔 11000-65000,撞了让后端报错
+  return 11000 + Math.floor(Math.random() * (65000 - 11000))
 }
 
 watch(
@@ -250,6 +261,8 @@ async function submit() {
     :model-value="visible"
     :title="mode === 'add' ? '添加入站' : '编辑入站'"
     width="640px"
+    class="constrained-dialog"
+    :align-center="false"
     @close="emit('close')"
     :close-on-click-modal="false"
   >

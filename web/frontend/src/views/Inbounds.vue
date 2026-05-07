@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Refresh, Delete, User, Connection, ArrowDown } from '@element-plus/icons-vue'
 import { http, post, postForm } from '@/api/http'
 import type { DBInbound } from '@/api/types'
 import { sizeFormat, fmtTimeMs, isExpired, isMultiUserProtocol, clientCount } from '@/utils/format'
@@ -21,6 +22,12 @@ const multiUser = computed(() =>
 )
 const singleUser = computed(() =>
   inbounds.value.filter((x) => !isMultiUserProtocol(x.protocol, x.settings))
+)
+
+// 已占用端口集合,传给 InboundForm 在 add 模式下挑下一个空闲端口,
+// 避免新建入站默认 10000 跟现有入站冲突。
+const usedPorts = computed(() =>
+  inbounds.value.map((x) => x.port).filter((p) => typeof p === 'number')
 )
 
 async function reload() {
@@ -213,9 +220,9 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="overview-actions">
-        <el-button type="primary" :icon="'Plus'" @click="openAdd">添加入站</el-button>
-        <el-button :icon="'Refresh'" @click="reload" :loading="loading">刷新</el-button>
-        <el-button type="danger" :icon="'Delete'" plain @click="delAll" v-if="inbounds.length > 0">
+        <el-button type="primary" :icon="Plus" @click="openAdd">添加入站</el-button>
+        <el-button :icon="Refresh" @click="reload" :loading="loading">刷新</el-button>
+        <el-button type="danger" :icon="Delete" plain @click="delAll" v-if="inbounds.length > 0">
           清空所有
         </el-button>
       </div>
@@ -358,6 +365,7 @@ onBeforeUnmount(() => {
       v-if="formVisible"
       :mode="formMode"
       :inbound="formInbound"
+      :used-ports="usedPorts"
       @close="formVisible = false"
       @saved="onSaved"
     />

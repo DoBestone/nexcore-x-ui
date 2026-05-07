@@ -103,3 +103,45 @@ body {
 .el-button + .el-button {
   margin-left: 8px;
 }
+
+/*
+ * constrained-dialog · 全局 dialog 高度兜底
+ *
+ * 规范要求:任何 el-dialog 总高 ≤ 66vh,超出 body 内部滚动,禁止超屏。
+ * 必须写在全局非 scoped 样式里 —— Element Plus dialog 用 Teleport 挂到
+ * <body>,组件内 <style scoped> 的 hash 选择器进不到挂载点,完全不生效。
+ *
+ * 三件套:header / body / footer 用 flex 显式布局
+ *   - header: flex 0 0 auto(自然高,不参与压缩)
+ *   - body:   flex 1 1 auto + min-height: 0(关键 —— 缺这行 overflow 永远不触发)
+ *   - footer: flex 0 0 auto(同 header)
+ *
+ * 移动端断点放宽到 80vh + 92vw,小屏视口太矮 66vh 会显得太局促。
+ *
+ * 验收:DevTools 量 .el-dialog.constrained-dialog 的 offsetHeight,
+ *      ≤ window.innerHeight * 0.66(PC)/ * 0.80(<768px)。
+ */
+.el-overlay-dialog .el-dialog.constrained-dialog {
+  max-height: 66vh;
+  display: flex;
+  flex-direction: column;
+  margin: 0 auto;
+  overflow: hidden;
+}
+.el-overlay-dialog .el-dialog.constrained-dialog .el-dialog__header {
+  flex: 0 0 auto;
+}
+.el-overlay-dialog .el-dialog.constrained-dialog .el-dialog__body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0; /* ⚠️ 缺这行 overflow 永远不触发 */
+}
+.el-overlay-dialog .el-dialog.constrained-dialog .el-dialog__footer {
+  flex: 0 0 auto;
+}
+@media (max-width: 768px) {
+  .el-overlay-dialog .el-dialog.constrained-dialog {
+    max-height: 80vh;
+    width: 92vw !important;
+  }
+}
