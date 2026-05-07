@@ -14,6 +14,37 @@ const loading = ref(false)
 const onlineIps = ref<Record<string, string[]>>({})
 let onlineTimer: number | null = null
 
+// 防火墙状态(/xui/api/firewall-status):后端检测到 UFW / firewalld
+// 启用时,把已放行的 TCP 端口列表带回来。前端跟 inbound.port 做差集,
+// 提示"端口被防火墙拦了,客户端连不进来" —— 历史上反复有用户拿了
+// 链接连不上,排了半天发现是 UFW INPUT DROP 没放行。
+type FirewallStatus = { active: boolean; tool: string; openPorts: number[] }
+const firewall = ref<FirewallStatus | null>(null)
+
+async function refreshFirewall() {
+  try {
+    const r = await http.get<{ success: boolean; obj: FirewallStatus }>(
+      'xui/api/firewall-status'
+    )
+    firewall.value = r.data?.obj ?? null
+  } catch {
+    firewall.value = null
+  }
+}
+
+// 当前 inbound 列表里被防火墙挡住的端口。多端口去重并排序,banner
+// 文案直接 join 成 "10000, 10002" 这种顺眼的串。
+const blockedPorts = computed<number[]>(() => {
+  const fw = firewall.value
+  if (!fw || !fw.active) return []
+  const open = new Set(fw.openPorts)
+  const used = new Set<number>()
+  for (const x of inbounds.value) {
+    if (typeof x.port === "number" && !open.has(x.port)) used.add(x.port)
+  }
+  return [...used].sort((a, b) => a - b)
+})
+
 const totalUp = computed(() => inbounds.value.reduce((a, x) => a + (x.up || 0), 0))
 const totalDown = computed(() => inbounds.value.reduce((a, x) => a + (x.down || 0), 0))
 
@@ -185,7 +216,9 @@ function openClientTraffic(row: DBInbound) {
 // ---------- lifecycle ----------
 onMounted(async () => {
   await reload()
-  await refreshOnlineIps()
+  // 防火墙状态后端 30s cache,前端跟着 inbound list 一起拉一次足够;
+  // 用户保存新 inbound 之后在 reload() 里再拉一次,见 onClose() 钩子。
+  await Promise.all([refreshOnlineIps(), refreshFirewall()])
   onlineTimer = window.setInterval(() => {
     if (!document.hidden) refreshOnlineIps()
   }, 5000)
@@ -202,6 +235,31 @@ onBeforeUnmount(() => {
 <template>
   <div class="nx-page">
     <h2>入站列表</h2>
+
+    <!-- 防火墙警告:UFW / firewalld 把当前 inbound 端口拦了,客户端连不上。
+         只读检测 + 提示,面板不替用户改防火墙 —— 文案给确切的修复命令,
+         多个端口一并展示,不催用户每条单点解决。 -->
+    <el-alert
+      v-if="blockedPorts.length"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="firewall-alert"
+    >
+      <template #title>
+        系统防火墙({{ firewall?.tool?.toUpperCase() }})阻挡入站端口:{{ blockedPorts.join(", ") }}
+      </template>
+      <template #default>
+        <div class="firewall-alert-body">
+          客户端从外网连接会超时。在服务器上执行:
+          <code class="firewall-alert-cmd">{{
+            firewall?.tool === "firewalld"
+              ? blockedPorts.map((p) => `firewall-cmd --permanent --add-port=${p}/tcp`).join(" && ") + " && firewall-cmd --reload"
+              : blockedPorts.map((p) => `ufw allow ${p}/tcp`).join(" && ")
+          }}</code>
+        </div>
+      </template>
+    </el-alert>
 
     <!-- 总览卡:统计 + 全局操作按钮 -->
     <div class="nx-card overview">
@@ -442,5 +500,23 @@ onBeforeUnmount(() => {
   color: var(--nx-text-muted);
   font-size: 12px;
   margin-left: 8px;
+}
+
+.firewall-alert {
+  margin-bottom: 16px;
+}
+.firewall-alert-body {
+  margin-top: 4px;
+  font-size: 13px;
+}
+.firewall-alert-cmd {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 6px;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  word-break: break-all;
 }
 </style>

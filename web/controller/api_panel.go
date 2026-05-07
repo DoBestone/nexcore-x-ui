@@ -33,6 +33,7 @@ type APIPanelController struct {
 	clientService        service.ClientService
 	inboundService       service.InboundService
 	shareService         service.ShareService
+	firewallService      service.FirewallService
 }
 
 func NewAPIPanelController(g *gin.RouterGroup) *APIPanelController {
@@ -71,6 +72,11 @@ func (a *APIPanelController) initRouter(g *gin.RouterGroup) {
 	g.GET("/inbounds/:id/info", a.getInboundInfo) // 给 modal 拿 protocol 决定字段
 	g.GET("/inbounds/:id/links", a.inboundLinks)  // email→link map,给 modal 行内二维码用
 	g.GET("/online-ips-by-email", a.onlineIPsByEmail)
+
+	// firewall-status:面板检测系统层 UFW / firewalld 状态 + 已放行 TCP
+	// 端口列表。前端用这个跟 inbound 端口做差集,提示"端口被防火墙拦
+	// 了,客户端连不进来"。只读探测,不动用户配置;详见 firewall.go。
+	g.GET("/firewall-status", a.firewallStatus)
 }
 
 // me — SPA 启动时打,用来判断当前 session 是否登录。未登录走 401(由
@@ -339,6 +345,16 @@ func (a *APIPanelController) inboundLinks(c *gin.Context) {
 		return
 	}
 	jsonObj(c, links, nil)
+}
+
+// ---------- firewall ----------
+
+// firewallStatus 直接把 FirewallService.Status() 返回值丢回去。前端
+// 30s 轮询一次即可(后端自己 cache 30s,所以多刷不会真去 fork ufw)。
+// session-auth 路由,不放到 /api/v1 token 路径 —— 这是 panel telemetry,
+// 跨节点 API 用户场景下意义不大。
+func (a *APIPanelController) firewallStatus(c *gin.Context) {
+	jsonObj(c, a.firewallService.Status(), nil)
 }
 
 // ---------- docs ----------
