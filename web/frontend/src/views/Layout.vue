@@ -51,7 +51,7 @@ async function doLogout() {
         <div class="brand-mark">N</div>
         <div class="brand-text">
           <div class="brand-name">NexCore X-UI</div>
-          <div class="brand-sub">v2.0.1</div>
+          <div class="brand-sub">v2.0.2</div>
         </div>
       </div>
       <nav class="menu">

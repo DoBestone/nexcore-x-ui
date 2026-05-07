@@ -78,8 +78,10 @@ func (s *XrayService) BuildCandidateConfig(inbounds []*model.Inbound) (*xray.Con
 		_ = json.Unmarshal(xrayConfig.LogConfig, &logCfg)
 	}
 	logCfg["access"] = xray.GetAccessLogPath()
+	// 与 GetXrayConfig 保持一致:默认 info,否则 dry-run 验证通过的 config
+	// 跑起来不会写 accepted 行,在线 IP 检测会失效。
 	if _, ok := logCfg["loglevel"]; !ok {
-		logCfg["loglevel"] = "warning"
+		logCfg["loglevel"] = "info"
 	}
 	if logBytes, err := json.Marshal(logCfg); err == nil {
 		xrayConfig.LogConfig = json_util.RawMessage(logBytes)

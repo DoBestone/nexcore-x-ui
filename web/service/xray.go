@@ -85,8 +85,12 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		_ = json.Unmarshal(xrayConfig.LogConfig, &logCfg)
 	}
 	logCfg["access"] = xray.GetAccessLogPath()
+	// loglevel 默认必须 info — xray 的"accepted ... [tag] email: foo"行
+	// 是 info 级别,默认 warning 会把它们全部过滤掉,导致 access.log 几乎
+	// 为空,在线 IP tail 全员显示离线。代价是 access.log 体积增长,由
+	// online_ip_service 周期性 truncate 防止把 1H1G 盘吃满。
 	if _, ok := logCfg["loglevel"]; !ok {
-		logCfg["loglevel"] = "warning"
+		logCfg["loglevel"] = "info"
 	}
 	if logBytes, err := json.Marshal(logCfg); err == nil {
 		xrayConfig.LogConfig = json_util.RawMessage(logBytes)

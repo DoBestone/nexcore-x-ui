@@ -25,11 +25,36 @@ watch(
 )
 
 async function copy() {
+  // navigator.clipboard 只在 HTTPS / localhost 上下文可用。X-UI 面板典型部署
+  // 是 http://IP:port 直连,modern API 会被浏览器以 NotAllowedError 拒掉 →
+  // fallback 到老 textarea + execCommand,虽然 deprecated 但在 http 上下文里
+  // 还能跑。两条路都失败才提示用户手选。
+  const text = props.link
   try {
-    await navigator.clipboard.writeText(props.link)
-    ElMessage.success('已复制')
+    if (window.isSecureContext && navigator.clipboard) {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success('已复制')
+      return
+    }
   } catch {
-    ElMessage.warning('复制失败,请手动选择文本')
+    /* fall through 到老方法 */
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', '')
+    ta.style.position = 'fixed'
+    ta.style.top = '0'
+    ta.style.left = '0'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.focus()
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    ElMessage[ok ? 'success' : 'warning'](ok ? '已复制' : '复制失败,请手动选中链接复制')
+  } catch {
+    ElMessage.warning('复制失败,请手动选中链接复制')
   }
 }
 </script>
@@ -40,6 +65,8 @@ async function copy() {
     @update:model-value="(v: boolean) => emit('update:modelValue', v)"
     :title="title || '二维码'"
     width="360px"
+    class="constrained-dialog"
+    :align-center="false"
     :close-on-click-modal="true"
   >
     <div class="qr-wrap">

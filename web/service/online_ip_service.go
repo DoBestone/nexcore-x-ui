@@ -58,7 +58,7 @@ func GetOnlineIPService() *OnlineIPService {
 	return onlineIPSvc
 }
 
-// Start 幂等启动后台 tail + GC goroutine。
+// Start 幂等启动后台 tail + GC + access.log 截断 goroutine。
 func (s *OnlineIPService) Start() {
 	s.mu.Lock()
 	if s.started {
@@ -70,6 +70,33 @@ func (s *OnlineIPService) Start() {
 
 	go s.tailLoop()
 	go s.gcLoop()
+	go s.truncateLoop()
+}
+
+// truncateLoop — loglevel=info 后 access.log 增长很快,1H1G VPS 盘会被吃满。
+// 每分钟检查一次,文件 ≥ accessLogMaxBytes 就 truncate 到 0。tailLoop 已经
+// 会发现文件被截断后自动从头重读(见那边的 stat.Size() < cur 分支),不用
+// 额外通信。truncate 而不是 rename+create:rename 后旧 fd 仍指向无名 inode,
+// xray 会继续往那个 inode 写 → 我们读不到新内容了;truncate(0) 让 xray 的
+// 写入位置在下次 write 时被内核 reset,新行从 offset=0 开始可读。
+const accessLogMaxBytes int64 = 5 * 1024 * 1024 // 5MB
+
+func (s *OnlineIPService) truncateLoop() {
+	path := xray.GetAccessLogPath()
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		stat, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if stat.Size() < accessLogMaxBytes {
+			continue
+		}
+		if err := os.Truncate(path, 0); err != nil {
+			logger.Warning("access.log truncate failed:", err)
+		}
+	}
 }
 
 // OnXrayRestart 重置内存状态，并通知 tailer 重新打开日志文件
@@ -108,6 +135,28 @@ func (s *OnlineIPService) recordEmail(email, ip string) {
 		s.byEmail[email] = ips
 	}
 	ips[ip] = now
+	s.mu.Unlock()
+}
+
+// TouchEmail — 流量心跳刷 TTL。access.log 只在 connection accept 那一刻有
+// 行,长连接(VLESS xtls-rprx-vision 看视频/挂代理)建立后不再产生新行,
+// 单纯靠 access-log-tail + TTL 过期就显示离线。修法:xray_traffic_job
+// 每次拉到 user 级 stats 时,有 delta>0 的 email 调一下 TouchEmail,把该
+// email 已知 IP 的 lastSeen 刷新到现在。这样只要流量在跑就一直显示在线,
+// 流量停了 TTL 自然过期。如果该 email 在 byEmail map 里还没有 IP(尚未
+// 收到 access.log 行),只能等下一次连接 accept 把 IP 补上,这条无解 ——
+// 所以 loglevel 也必须 info,保证 accepted 行能被 tailer 抓到一次。
+func (s *OnlineIPService) TouchEmail(email string) {
+	if email == "" {
+		return
+	}
+	now := time.Now()
+	s.mu.Lock()
+	if ips, ok := s.byEmail[email]; ok {
+		for ip := range ips {
+			ips[ip] = now
+		}
+	}
 	s.mu.Unlock()
 }
 
