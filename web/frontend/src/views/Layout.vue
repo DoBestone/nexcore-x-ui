@@ -1,0 +1,188 @@
+<script setup lang="ts">
+import { useRoute, useRouter, RouterView } from 'vue-router'
+import { ElMessageBox } from 'element-plus'
+import { useAuthStore } from '@/stores/auth'
+
+const router = useRouter()
+const route = useRoute()
+const auth = useAuthStore()
+
+interface NavItem {
+  path: string
+  title: string
+  icon: string
+}
+
+const nav: NavItem[] = [
+  { path: '/dashboard', title: '系统状态', icon: 'Odometer' },
+  { path: '/inbounds', title: '入站列表', icon: 'Connection' },
+  { path: '/block-rules', title: '屏蔽规则', icon: 'Lock' },
+  { path: '/api-console', title: 'API 控制台', icon: 'Document' },
+  { path: '/settings', title: '面板设置', icon: 'Setting' }
+]
+
+// 不用 el-menu — 它的 default-active prop 在 router 模式下经常落后
+// 一档(内部 active 状态被 click 和 prop watcher 抢着写,batched 更新
+// 后留在旧值)。自己写 <nav> + 高亮按 route.path === n.path 直接判断,
+// 100% 反应式且简单。
+function onSelect(path: string) {
+  if (path !== route.path) router.push(path)
+}
+
+async function doLogout() {
+  try {
+    await ElMessageBox.confirm('确认退出登录?', '退出', {
+      type: 'warning',
+      confirmButtonText: '退出',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+  await auth.logout()
+  router.replace('/login')
+}
+</script>
+
+<template>
+  <el-container class="layout">
+    <el-aside class="side" width="220px">
+      <div class="brand">
+        <div class="brand-mark">N</div>
+        <div class="brand-text">
+          <div class="brand-name">NexCore X-UI</div>
+          <div class="brand-sub">v2.0.0</div>
+        </div>
+      </div>
+      <nav class="menu">
+        <a
+          v-for="n in nav"
+          :key="n.path"
+          class="menu-item"
+          :class="{ active: route.path === n.path }"
+          @click.prevent="onSelect(n.path)"
+          :href="n.path"
+        >
+          <el-icon><component :is="n.icon" /></el-icon>
+          <span>{{ n.title }}</span>
+        </a>
+      </nav>
+      <div class="side-foot">
+        <div class="user">
+          <el-icon><User /></el-icon>
+          <span>{{ auth.me?.username || '...' }}</span>
+        </div>
+        <el-button text size="small" @click="doLogout">
+          <el-icon><SwitchButton /></el-icon>
+          退出
+        </el-button>
+      </div>
+    </el-aside>
+    <el-main class="main">
+      <RouterView />
+    </el-main>
+  </el-container>
+</template>
+
+<style scoped>
+.layout {
+  height: 100vh;
+}
+
+.side {
+  background: #ffffff;
+  border-right: 1px solid var(--nx-border);
+  display: flex;
+  flex-direction: column;
+  padding: 16px 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px 16px;
+  border-bottom: 1px solid var(--nx-border);
+  margin-bottom: 8px;
+}
+
+.brand-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #2563eb, #4f46e5);
+  color: #fff;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.brand-name {
+  font-weight: 600;
+  color: var(--nx-text-strong);
+  font-size: 14px;
+}
+
+.brand-sub {
+  font-size: 11px;
+  color: var(--nx-text-soft);
+}
+
+.menu {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 4px 8px;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  height: 40px;
+  border-radius: 8px;
+  color: var(--nx-text);
+  text-decoration: none;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.menu-item:hover {
+  background: var(--nx-bg);
+}
+
+.menu-item.active {
+  background: var(--nx-primary-soft);
+  color: var(--nx-primary);
+  font-weight: 500;
+}
+
+.side-foot {
+  padding: 12px 16px;
+  border-top: 1px solid var(--nx-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.user {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--nx-text-muted);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.main {
+  background: var(--nx-bg);
+  padding: 0;
+  overflow: auto;
+}
+</style>

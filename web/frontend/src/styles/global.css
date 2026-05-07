@@ -1,0 +1,105 @@
+/* NexCore 控制台 — 明亮 SaaS 主题。配合 nexcore-ui skill 的色板。 */
+
+:root {
+  --nx-bg: #f6f7fb;
+  --nx-bg-card: #ffffff;
+  --nx-text-strong: #0f172a;
+  --nx-text: #334155;
+  --nx-text-muted: #64748b;
+  --nx-text-soft: #94a3b8;
+  --nx-border: #e2e8f0;
+  --nx-primary: #2563eb;
+  --nx-primary-soft: #dbeafe;
+  --nx-success: #16a34a;
+  --nx-warning: #ea580c;
+  --nx-danger: #b91c1c;
+  --nx-radius: 10px;
+  --nx-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.04);
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--nx-bg);
+  color: var(--nx-text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Element Plus 主题色对齐 nexcore-ui */
+:root {
+  --el-color-primary: var(--nx-primary);
+  --el-border-radius-base: 8px;
+  --el-text-color-primary: var(--nx-text-strong);
+  --el-text-color-regular: var(--nx-text);
+  --el-text-color-secondary: var(--nx-text-muted);
+  --el-text-color-placeholder: var(--nx-text-soft);
+  --el-border-color: var(--nx-border);
+  --el-bg-color: var(--nx-bg);
+  --el-bg-color-page: var(--nx-bg);
+  --el-fill-color-blank: var(--nx-bg-card);
+}
+
+.nx-card {
+  background: var(--nx-bg-card);
+  border-radius: var(--nx-radius);
+  box-shadow: var(--nx-shadow);
+  padding: 20px;
+}
+
+.nx-page {
+  padding: 20px;
+}
+
+.nx-page h2 {
+  color: var(--nx-text-strong);
+  margin: 0 0 16px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.nx-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.nx-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.nx-grow {
+  flex: 1;
+}
+
+.nx-muted {
+  color: var(--nx-text-muted);
+}
+
+.nx-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
+
+/* el-card 与全局风格统一 */
+.el-card {
+  border: none !important;
+  box-shadow: var(--nx-shadow) !important;
+  border-radius: var(--nx-radius) !important;
+}
+
+.el-button + .el-button {
+  margin-left: 8px;
+}

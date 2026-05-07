@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"embed"
-	"html/template"
 	"io"
 	"io/fs"
 	"net"
@@ -35,11 +34,12 @@ import (
 	"golang.org/x/text/language"
 )
 
-//go:embed assets/*
-var assetsFS embed.FS
-
-//go:embed html/*
-var htmlFS embed.FS
+// v2.0:Vue 3 SPA 构建产物。`web/frontend/dist/` 必须存在(至少有
+// index.html),否则编译时 embed 失败。CI 在 go build 之前会跑
+// `cd web/frontend && npm ci && npm run build` 生成它。
+//
+//go:embed all:frontend/dist
+var spaDistFS embed.FS
 
 // securityHeadersMiddleware applies a conservative set of headers to
 // every panel response. They cost nothing on the server and make a
@@ -307,18 +307,28 @@ var i18nFS embed.FS
 
 var startTime = time.Now()
 
-type wrapAssetsFS struct {
-	embed.FS
+// spaSubFS 把 embed 根目录从 `frontend/dist` 收成 `dist 根`,这样
+// gin.StaticFS 直接把 /assets/foo.js 映射到 frontend/dist/assets/foo.js,
+// 而不用让上层路由意识到 frontend/dist 这个前缀。同时把 ModTime 钉到
+// 进程启动时间,避免每次请求 stat 出 1970 影响 If-Modified-Since。
+type spaSubFS struct {
+	root fs.FS
 }
 
-func (f *wrapAssetsFS) Open(name string) (fs.File, error) {
-	file, err := f.FS.Open("assets/" + name)
+func newSPASubFS() (*spaSubFS, error) {
+	sub, err := fs.Sub(spaDistFS, "frontend/dist")
 	if err != nil {
 		return nil, err
 	}
-	return &wrapAssetsFile{
-		File: file,
-	}, nil
+	return &spaSubFS{root: sub}, nil
+}
+
+func (f *spaSubFS) Open(name string) (fs.File, error) {
+	file, err := f.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &wrapAssetsFile{File: file}, nil
 }
 
 type wrapAssetsFile struct {
@@ -371,48 +381,6 @@ func NewServer() *Server {
 		ctx:    ctx,
 		cancel: cancel,
 	}
-}
-
-func (s *Server) getHtmlFiles() ([]string, error) {
-	files := make([]string, 0)
-	dir, _ := os.Getwd()
-	err := fs.WalkDir(os.DirFS(dir), "web/html", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		files = append(files, path)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return files, nil
-}
-
-func (s *Server) getHtmlTemplate(funcMap template.FuncMap) (*template.Template, error) {
-	t := template.New("").Funcs(funcMap)
-	err := fs.WalkDir(htmlFS, "html", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if d.IsDir() {
-			newT, err := t.ParseFS(htmlFS, path+"/*.html")
-			if err != nil {
-				// ignore
-				return nil
-			}
-			t = newT
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return t, nil
 }
 
 func (s *Server) initRouter() (*gin.Engine, error) {
@@ -501,23 +469,53 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 		return nil, err
 	}
 
+	// v2.0:Vue 3 SPA 接管所有 UI 路由。dev 模式直接从磁盘读 dist/,
+	// 这样 `npm run build` 后不用重启 Go 进程就能看到新前端。
+	// prod 模式从 embed FS 读,保持单二进制部署形态。
+	var distRoot fs.FS
 	if config.IsDebug() {
-		// for develop
-		files, err := s.getHtmlFiles()
-		if err != nil {
-			return nil, err
-		}
-		engine.LoadHTMLFiles(files...)
-		engine.StaticFS(basePath+"assets", http.FS(os.DirFS("web/assets")))
+		distRoot = os.DirFS("web/frontend/dist")
 	} else {
-		// for prod
-		t, err := s.getHtmlTemplate(engine.FuncMap)
+		sub, err := newSPASubFS()
 		if err != nil {
 			return nil, err
 		}
-		engine.SetHTMLTemplate(t)
-		engine.StaticFS(basePath+"assets", http.FS(&wrapAssetsFS{FS: assetsFS}))
+		distRoot = sub
 	}
+	assetsSub, err := fs.Sub(distRoot, "assets")
+	if err != nil {
+		return nil, err
+	}
+	engine.StaticFS(basePath+"assets", http.FS(assetsSub))
+
+	// SPA 入口:base path 根 GET → index.html。SPA 用 hash router,
+	// 但用户直接访问 /xui/inbounds 之类老路径时这个兜底负责把 SPA 壳
+	// 给浏览器,后续路由由 vue-router 处理。
+	indexHandler := func(c *gin.Context) {
+		f, err := distRoot.Open("index.html")
+		if err != nil {
+			c.String(http.StatusInternalServerError, "frontend not built — run `cd web/frontend && npm run build`")
+			return
+		}
+		defer f.Close()
+		data, err := io.ReadAll(f)
+		if err != nil {
+			c.String(http.StatusInternalServerError, "read index.html: "+err.Error())
+			return
+		}
+		c.Header("Cache-Control", "no-cache")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+	}
+	engine.GET(basePath, indexHandler)
+	// v2.0 SPA 兜底:面板下任何没匹配到 API/asset 路由的 GET 全部返回
+	// SPA 入口。HEAD 一并兜底。其他方法仍按 405 处理。
+	engine.NoRoute(func(c *gin.Context) {
+		if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
+			indexHandler(c)
+			return
+		}
+		c.String(http.StatusNotFound, "not found")
+	})
 
 	g := engine.Group(basePath)
 	// CSRF defense for the cookie-authenticated panel: state-changing
@@ -564,7 +562,9 @@ func (s *Server) handleMagicLogin(c *gin.Context) {
 	if basePath == "" {
 		basePath = "/"
 	}
-	c.Redirect(http.StatusFound, basePath+"xui/")
+	// v2.0:SPA 入口在 base path 根,hash router 自动把 / 解析到
+	// /#/dashboard。原来的 xui/ 老路径已经废弃。
+	c.Redirect(http.StatusFound, basePath)
 }
 
 func (s *Server) initI18n(engine *gin.Engine) error {

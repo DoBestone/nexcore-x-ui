@@ -246,6 +246,27 @@ func (s *InboundService) DelInbound(id int) error {
 	return db.Delete(model.Inbound{}, id).Error
 }
 
+// DeleteAll — 一次性清空所有 inbound + 它们绑定的 client_traffics 行。
+// 走单事务,要么全成要么全回滚,避免 inbounds 没了但 client_traffics
+// 还残留(后者用 email 当主索引,没了 inbound 就成孤儿行)。GORM 在
+// 没 WHERE 的 Delete 默认会拒掉,所以用 Where("1 = 1") 显式表态。
+func (s *InboundService) DeleteAll() (int64, error) {
+	db := database.GetDB()
+	var n int64
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if r := tx.Where("1 = 1").Delete(&model.ClientTraffic{}); r.Error != nil {
+			return r.Error
+		}
+		r := tx.Where("1 = 1").Delete(&model.Inbound{})
+		if r.Error != nil {
+			return r.Error
+		}
+		n = r.RowsAffected
+		return nil
+	})
+	return n, err
+}
+
 func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {
 	db := database.GetDB()
 	inbound := &model.Inbound{}

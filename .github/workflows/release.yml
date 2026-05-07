@@ -64,6 +64,23 @@ jobs:
           # so a deps change invalidates exactly when expected.
           cache: true
 
+      # v2.0:Vue 3 SPA 构建产物嵌入 Go 二进制(`go:embed all:frontend/dist`),
+      # 所以 Go build 之前必须先跑前端 build。Node 钉死 20.x —— 升级前
+      # 在本地验证 npm ci + npm run build 仍干净通过。
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/frontend/package-lock.json
+
+      - name: build frontend SPA
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          cd web/frontend
+          npm ci
+          npm run build
+
       - name: install cross compiler
         run: |
           sudo apt-get update -y

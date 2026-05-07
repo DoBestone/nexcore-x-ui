@@ -79,6 +79,45 @@ func (s *ShareService) linksForLoadedInbound(in *model.Inbound, host string) ([]
 	return out, nil
 }
 
+// LinksByEmail returns email → share-link, one entry per email-bearing client.
+// 客户端流量 modal 行内"二维码"按钮调它:面板根据当前 email 行从 map
+// 取一条链接喂给 qrModal,不需要额外 query 参数。SS-legacy 这种没 email
+// 的协议天然不出现在 map 里(本来 modal 也不展示)。
+func (s *ShareService) LinksByEmail(inboundID int, host string) (map[string]string, error) {
+	in, err := s.inboundService.GetInbound(inboundID)
+	if err != nil {
+		return nil, err
+	}
+	clients, _, err := readClients(in)
+	if err != nil {
+		return nil, err
+	}
+	stream := map[string]any{}
+	if in.StreamSettings != "" {
+		_ = json.Unmarshal([]byte(in.StreamSettings), &stream)
+	}
+	out := make(map[string]string, len(clients))
+	for _, c := range clients {
+		email, _ := c["email"].(string)
+		if email == "" {
+			continue
+		}
+		var link string
+		switch in.Protocol {
+		case model.VMess:
+			link = buildVMessLink(in, host, c, stream)
+		case model.VLESS:
+			link = buildVLESSLink(in, host, c, stream)
+		case model.Trojan:
+			link = buildTrojanLink(in, host, c, stream)
+		}
+		if link != "" {
+			out[email] = link
+		}
+	}
+	return out, nil
+}
+
 // SubscriptionForInbound returns a base64-encoded blob of all share links —
 // the format consumed by every standard proxy client (V2RayN, Shadowrocket).
 func (s *ShareService) SubscriptionForInbound(inboundID int, host string) (string, error) {

@@ -29,6 +29,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/list", a.getInbounds)
 	g.POST("/add", a.addInbound)
 	g.POST("/del/:id", a.delInbound)
+	g.POST("/del-all", a.delAllInbounds)
 	g.POST("/update/:id", a.updateInbound)
 	g.POST("/onlineIps", a.getOnlineIps)
 }
@@ -85,6 +86,19 @@ func (a *InboundController) delInbound(c *gin.Context) {
 	if err == nil {
 		a.xrayService.SetToNeedRestart()
 	}
+}
+
+// delAllInbounds — 一键清空所有入站。前端二次确认后调,服务侧单事务
+// 同时清 inbounds + client_traffics(避免孤儿 ClientTraffic 行)。
+// 返回删除的入站行数,前端拿来给 toast 提示。
+func (a *InboundController) delAllInbounds(c *gin.Context) {
+	n, err := a.inboundService.DeleteAll()
+	if err != nil {
+		jsonMsg(c, "清空入站", err)
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	jsonObj(c, gin.H{"deleted": n}, nil)
 }
 
 // getOnlineIps 返回每个入站当前活跃的源 IP 列表（运行时数据，60s TTL）。

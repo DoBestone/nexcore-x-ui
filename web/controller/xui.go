@@ -4,6 +4,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// XUIController 把所有 panel 业务 API(/xui/inbound/*, /xui/setting/*,
+// /xui/api/*, /xui/block-rule/*) 挂到一个 session-auth group 下。
+// v2.0:不再渲染任何 HTML 模板,UI 整体由 Vue 3 SPA 接管,在 web.go
+// 顶层挂 SPA 入口 + StaticFS。
 type XUIController struct {
 	BaseController
 
@@ -23,34 +27,8 @@ func (a *XUIController) initRouter(g *gin.RouterGroup) {
 	g = g.Group("/xui")
 	g.Use(a.checkLogin)
 
-	g.GET("/", a.index)
-	g.GET("/inbounds", a.inbounds)
-	g.GET("/setting", a.setting)
-	g.GET("/api-console", a.apiConsole)
-	g.GET("/block-rules", a.blockRules)
-
 	a.inboundController = NewInboundController(g)
 	a.settingController = NewSettingController(g)
 	a.apiPanelController = NewAPIPanelController(g)
 	a.blockRuleController = NewBlockRuleController(g)
-}
-
-func (a *XUIController) index(c *gin.Context) {
-	html(c, "index.html", "系统状态", nil)
-}
-
-func (a *XUIController) inbounds(c *gin.Context) {
-	html(c, "inbounds.html", "入站列表", nil)
-}
-
-func (a *XUIController) setting(c *gin.Context) {
-	html(c, "setting.html", "设置", nil)
-}
-
-func (a *XUIController) apiConsole(c *gin.Context) {
-	html(c, "api_console.html", "API 控制台", nil)
-}
-
-func (a *XUIController) blockRules(c *gin.Context) {
-	html(c, "block_rules.html", "屏蔽规则", nil)
 }

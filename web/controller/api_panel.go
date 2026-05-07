@@ -3,11 +3,13 @@ package controller
 import (
 	"embed"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"nexcore-x-ui/web/service"
+	"nexcore-x-ui/web/session"
 )
 
 // docsFS embeds the markdown source so the panel can serve it inline. The
@@ -29,6 +31,7 @@ type APIPanelController struct {
 	xrayService          service.XrayService
 	clientService        service.ClientService
 	inboundService       service.InboundService
+	shareService         service.ShareService
 }
 
 func NewAPIPanelController(g *gin.RouterGroup) *APIPanelController {
@@ -39,6 +42,7 @@ func NewAPIPanelController(g *gin.RouterGroup) *APIPanelController {
 
 func (a *APIPanelController) initRouter(g *gin.RouterGroup) {
 	g = g.Group("/api")
+	g.GET("/me", a.me)
 	g.GET("/tokens", a.listTokens)
 	g.POST("/tokens", a.createToken)
 	g.POST("/tokens/:id/revoke", a.revokeToken)
@@ -64,6 +68,22 @@ func (a *APIPanelController) initRouter(g *gin.RouterGroup) {
 	g.PUT("/inbounds/:id/clients/:identifier", a.updateInboundClient)
 	g.DELETE("/inbounds/:id/clients/:identifier", a.deleteInboundClient)
 	g.GET("/inbounds/:id/info", a.getInboundInfo) // 给 modal 拿 protocol 决定字段
+	g.GET("/inbounds/:id/links", a.inboundLinks)  // email→link map,给 modal 行内二维码用
+	g.GET("/online-ips-by-email", a.onlineIPsByEmail)
+}
+
+// me — SPA 启动时打,用来判断当前 session 是否登录。未登录走 401(由
+// XUIController.checkLogin 中间件统一拦截)。
+func (a *APIPanelController) me(c *gin.Context) {
+	user := session.GetLoginUser(c)
+	if user == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"success": false, "msg": "未登录"})
+		return
+	}
+	jsonObj(c, gin.H{
+		"id":       user.Id,
+		"username": user.Username,
+	}, nil)
 }
 
 // ---------- tokens ----------
@@ -281,6 +301,33 @@ func (a *APIPanelController) getInboundInfo(c *gin.Context) {
 		"port":     in.Port,
 		"settings": in.Settings,
 	}, nil)
+}
+
+// onlineIPsByEmail — 客户端流量 modal 用,每行显示该 client 当前在线 IP。
+// 内存 60s TTL,无需 DB。返回 { "alice@x": ["1.2.3.4"], ... }。
+func (a *APIPanelController) onlineIPsByEmail(c *gin.Context) {
+	jsonObj(c, service.GetOnlineIPService().GetIPsByEmail(), nil)
+}
+
+// inboundLinks — 返回该 inbound 下每个 email 客户端的分享链接(email→link)。
+// host 默认取请求 Host(去 port);用户也可显式 ?host= 覆盖。注意这个路由
+// 是 panel session-auth 而不是 /api/v1 token-auth,所以不走 subAllowedHosts
+// 白名单 — 已经登录的面板用户本来就能看 settings,host 决策权交给他。
+func (a *APIPanelController) inboundLinks(c *gin.Context) {
+	id := int(getUriId(c))
+	host := strings.TrimSpace(c.Query("host"))
+	if host == "" {
+		host = c.Request.Host
+		if i := strings.IndexByte(host, ':'); i >= 0 {
+			host = host[:i]
+		}
+	}
+	links, err := a.shareService.LinksByEmail(id, host)
+	if err != nil {
+		jsonObj(c, nil, err)
+		return
+	}
+	jsonObj(c, links, nil)
 }
 
 // ---------- docs ----------

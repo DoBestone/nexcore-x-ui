@@ -8,10 +8,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"nexcore-x-ui/config"
 	"nexcore-x-ui/logger"
 	"nexcore-x-ui/web/entity"
 )
+
+// isAjax reports whether the request looks like an XHR/fetch from the
+// SPA. Used by base.checkLogin to decide between 401 JSON and a redirect.
+func isAjax(c *gin.Context) bool {
+	return c.GetHeader("X-Requested-With") == "XMLHttpRequest"
+}
 
 // fmtSscanf is a tiny helper to parse single-int query params without
 // importing strconv in every controller file.
@@ -87,67 +92,3 @@ func pureJsonMsg(c *gin.Context, success bool, msg string) {
 	}
 }
 
-// sensitiveQueryParams are the names we redact before reflecting the
-// request URI back into a template. Any future "we leak ?token=..."
-// regression gets neutered before it reaches the user's browser
-// history / referer chain.
-var sensitiveQueryParams = map[string]bool{
-	"api_token":  true,
-	"token":      true,
-	"password":   true,
-	"passwd":     true,
-	"secret":     true,
-	"key":        true,
-}
-
-// redactRequestURI returns the request URI with any query parameter in
-// sensitiveQueryParams replaced by "<redacted>". The path component is
-// left intact so back-link logic still works after a session expiry
-// redirect.
-func redactRequestURI(rawURI string) string {
-	q := strings.IndexByte(rawURI, '?')
-	if q < 0 {
-		return rawURI
-	}
-	pathPart, queryPart := rawURI[:q], rawURI[q+1:]
-	pairs := strings.Split(queryPart, "&")
-	for i, p := range pairs {
-		eq := strings.IndexByte(p, '=')
-		var name string
-		if eq < 0 {
-			name = p
-		} else {
-			name = p[:eq]
-		}
-		if sensitiveQueryParams[strings.ToLower(name)] {
-			pairs[i] = name + "=<redacted>"
-		}
-	}
-	return pathPart + "?" + strings.Join(pairs, "&")
-}
-
-func html(c *gin.Context, name string, title string, data gin.H) {
-	if data == nil {
-		data = gin.H{}
-	}
-	data["title"] = title
-	data["request_uri"] = redactRequestURI(c.Request.RequestURI)
-	data["base_path"] = c.GetString("base_path")
-	c.HTML(http.StatusOK, name, getContext(data))
-}
-
-func getContext(h gin.H) gin.H {
-	a := gin.H{
-		"cur_ver": config.GetVersion(),
-	}
-	if h != nil {
-		for key, value := range h {
-			a[key] = value
-		}
-	}
-	return a
-}
-
-func isAjax(c *gin.Context) bool {
-	return c.GetHeader("X-Requested-With") == "XMLHttpRequest"
-}

@@ -40,10 +40,16 @@ func (a *BaseController) checkLogin(c *gin.Context) {
 }
 
 func (a *BaseController) failLogin(c *gin.Context) {
+	// SPA / 任何 fetch 走 AJAX 分支:返回 401 + JSON body,前端 axios
+	// 拦截器据此跳 /login。浏览器直接刷面板路径(/dashboard 之类)走
+	// 重定向分支:把用户送回 /,SPA 入口接管后再跳 /login。
 	if isAjax(c) {
-		pureJsonMsg(c, false, "登录时效已过，请重新登录")
-	} else {
-		c.Redirect(http.StatusTemporaryRedirect, c.GetString("base_path"))
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"msg":     "登录时效已过,请重新登录",
+		})
+		return
 	}
+	c.Redirect(http.StatusTemporaryRedirect, c.GetString("base_path"))
 	c.Abort()
 }

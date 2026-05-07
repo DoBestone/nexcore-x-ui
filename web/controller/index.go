@@ -101,17 +101,9 @@ func NewIndexController(g *gin.RouterGroup) *IndexController {
 }
 
 func (a *IndexController) initRouter(g *gin.RouterGroup) {
-	g.GET("/", a.index)
+	// v2.0:GET / 不再返回 login.html,SPA 入口在 web.go 顶层 StaticFS 挂载
 	g.POST("/login", a.login)
 	g.GET("/logout", a.logout)
-}
-
-func (a *IndexController) index(c *gin.Context) {
-	if session.IsLogin(c) {
-		c.Redirect(http.StatusTemporaryRedirect, "xui/")
-		return
-	}
-	html(c, "login.html", "登录", nil)
 }
 
 func (a *IndexController) login(c *gin.Context) {
