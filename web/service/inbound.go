@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -14,6 +15,53 @@ import (
 
 	"gorm.io/gorm"
 )
+
+// validateListenAddress 确保 inbound 的 listen 字段在保存前能落到本机 NIC
+// 上,避免 xray 启动时 bind: cannot assign requested address。
+//
+// 这条错误的杀伤力远超表面 —— 一个 inbound 写错了 listen,xray 整个进程
+// 启动失败 / 退出,所有其它 inbound(完全无关的 SS / VLESS / Trojan)同
+// 一时间全部不可达。客户端表象就是"软件连接超时",而面板用户根本想
+// 不到是某条 vmess 入站把全场拖下水。审计指出的最常见误填:云厂商弹性
+// 公网 IP —— 通过 NAT 进来,本机 NIC 上根本没这地址。
+//
+// 通过条件:
+//   - 留空(""):xray 默认监听 0.0.0.0,最常见也最安全。
+//   - 0.0.0.0 / ::(unspecified):显式监听全部接口。
+//   - IP 字面量且在本机 net.InterfaceAddrs() 里命中。
+//
+// 拒绝条件返回带上下文的 common.NewError,前端把 message 直接 toast 出来。
+func validateListenAddress(listen string) error {
+	listen = strings.TrimSpace(listen)
+	if listen == "" {
+		return nil
+	}
+	want := net.ParseIP(listen)
+	if want == nil {
+		return common.NewError("listen 必须是 IP 地址(留空表示监听全部接口),不接受域名: ", listen)
+	}
+	if want.IsUnspecified() {
+		return nil
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		// 罕见的内核错误,不在校验失败里把保存阻死。
+		return nil
+	}
+	for _, a := range addrs {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip != nil && ip.Equal(want) {
+			return nil
+		}
+	}
+	return common.NewError("listen 地址不在本机网卡(NIC)上,xray 启动会 bind 失败,届时所有入站(包含其它协议)一起不可达。云厂商公网 IP 通常通过 NAT 映射进来,本机看不到,请改填内网 IP 或留空让 xray 监听全部接口: ", listen)
+}
 
 // ErrProtocolSingleton is returned when an operator tries to add a second
 // inbound for a protocol that supports multi-user via settings.clients[]
@@ -138,6 +186,9 @@ func (s *InboundService) checkPortExist(port int, ignoreId int) (bool, error) {
 }
 
 func (s *InboundService) AddInbound(inbound *model.Inbound) error {
+	if err := validateListenAddress(inbound.Listen); err != nil {
+		return err
+	}
 	exist, err := s.checkPortExist(inbound.Port, 0)
 	if err != nil {
 		return err
@@ -236,6 +287,9 @@ func (s *InboundService) AddInbounds(inbounds []*model.Inbound) error {
 	seen := make(map[int]struct{}, len(inbounds))
 	seenSingleton := map[model.Protocol]bool{}
 	for _, in := range inbounds {
+		if err := validateListenAddress(in.Listen); err != nil {
+			return err
+		}
 		if _, dup := seen[in.Port]; dup {
 			return common.NewError("批次内端口重复:", in.Port)
 		}
@@ -327,6 +381,9 @@ func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {
 }
 
 func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
+	if err := validateListenAddress(inbound.Listen); err != nil {
+		return err
+	}
 	exist, err := s.checkPortExist(inbound.Port, inbound.Id)
 	if err != nil {
 		return err
