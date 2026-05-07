@@ -103,7 +103,13 @@ func NewIndexController(g *gin.RouterGroup) *IndexController {
 func (a *IndexController) initRouter(g *gin.RouterGroup) {
 	// v2.0:GET / 不再返回 login.html,SPA 入口在 web.go 顶层 StaticFS 挂载
 	g.POST("/login", a.login)
-	g.GET("/logout", a.logout)
+	// Logout is POST so it can't be triggered cross-origin by an <img
+	// src> or <a href> from a malicious page in the same eTLD+1
+	// (subdomain takeover, internal proxy that injects HTML into a
+	// neighbouring app). originCSRFMiddleware on this group already
+	// requires Origin/Referer to match Host on POSTs — that closes the
+	// CSRF logout vector that GET /logout left open.
+	g.POST("/logout", a.logout)
 }
 
 func (a *IndexController) login(c *gin.Context) {
@@ -164,10 +170,13 @@ func (a *IndexController) login(c *gin.Context) {
 }
 
 func (a *IndexController) logout(c *gin.Context) {
-	user := session.GetLoginUser(c)
-	if user != nil {
-		logger.Info("user", user.Id, "logout")
+	if id, ok := session.SnapshotID(c); ok {
+		logger.Info("user", id, "logout")
 	}
 	session.ClearSession(c)
-	c.Redirect(http.StatusTemporaryRedirect, c.GetString("base_path"))
+	// SPA fetches this; respond with plain JSON, the client routes back
+	// to /login on the success path. We do NOT redirect here — a 307 in
+	// response to a POST is a poor browser experience and the SPA has
+	// to do its own state cleanup either way.
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }

@@ -180,6 +180,110 @@ func TestGzip_MultipleSmallWritesSurvive(t *testing.T) {
 	}
 }
 
+// TestGzip_WriteStringRoutesThroughWrite pins the post-audit fix: callers
+// using c.Writer.WriteString or io.WriteString(c.Writer, …) must hit the
+// same buffering / threshold logic as Write([]byte). Without the
+// gzipResponseWriter.WriteString override these would skip the buffer
+// entirely and reproduce the v1.0.4 silent-drop behaviour through a
+// different entry point. Asserts the body round-trips AND the small
+// response did get flushed (non-empty wire body either as gzip or plain).
+func TestGzip_WriteStringRoutesThroughWrite(t *testing.T) {
+	r := newGinWithGzip()
+	body := "small-via-WriteString-" + strings.Repeat("z", 50) // ~71 bytes, < 1KB
+	r.GET("/ws", func(c *gin.Context) {
+		c.Writer.Header().Set("Content-Type", "text/plain")
+		_, _ = c.Writer.WriteString(body)
+	})
+
+	rec := doRequest(t, r, "/ws", "gzip")
+	if rec.Code != 200 {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatalf("WriteString body was silently dropped — wrapper bypass regressed")
+	}
+	got := rec.Body.Bytes()
+	if rec.Header().Get("Content-Encoding") == "gzip" {
+		gz, err := gzip.NewReader(bytes.NewReader(got))
+		if err != nil {
+			t.Fatalf("claimed gzip but unreadable: %v", err)
+		}
+		got, _ = io.ReadAll(gz)
+	}
+	if string(got) != body {
+		t.Fatalf("WriteString body changed: got %q want %q", got, body)
+	}
+}
+
+// TestGzip_AlreadyEncodedPassThrough — when an upstream handler sets its
+// own Content-Encoding (e.g. serving a pre-compressed .br asset, or a
+// proxy-passthrough), our middleware must NOT double-encode AND must
+// flush whatever bytes accumulated in the buffer before the handler
+// declared its encoding. This is the second half of the v1.0.4 class of
+// bug: the original write path silently dropped any pre-encoding bytes.
+func TestGzip_AlreadyEncodedPassThrough(t *testing.T) {
+	r := newGinWithGzip()
+	// Build a real gzip-encoded payload so we can verify it survived
+	// untouched (i.e. NOT double-gzipped).
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write([]byte("preencoded-payload-" + strings.Repeat("y", 200)))
+	_ = zw.Close()
+	encoded := buf.Bytes()
+
+	r.GET("/pre", func(c *gin.Context) {
+		c.Writer.Header().Set("Content-Type", "application/octet-stream")
+		c.Writer.Header().Set("Content-Encoding", "gzip")
+		_, _ = c.Writer.Write(encoded)
+	})
+
+	rec := doRequest(t, r, "/pre", "gzip")
+	if rec.Code != 200 {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	if rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("Content-Encoding lost: %q", rec.Header().Get("Content-Encoding"))
+	}
+	if !bytes.Equal(rec.Body.Bytes(), encoded) {
+		t.Fatalf("middleware mangled an already-encoded body (double-encoded?): got %d bytes, want %d",
+			rec.Body.Len(), len(encoded))
+	}
+}
+
+// TestGzip_HandlerPanicLeavesNoStuckBuffer — if a handler panics mid-
+// response, gin.Recovery catches it. The middleware's deferred
+// releaseGzipWriter must still run (sync.Pool reuse), and any bytes the
+// handler buffered before the panic must NOT be silently committed as a
+// truncated response. We accept either an empty body or a 5xx; what we
+// don't accept is a process-level crash or a leaked gz writer state.
+func TestGzip_HandlerPanicLeavesNoStuckBuffer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(gzipMiddleware())
+	r.GET("/boom", func(c *gin.Context) {
+		c.Writer.Header().Set("Content-Type", "text/plain")
+		_, _ = c.Writer.Write([]byte("partial-write-before-panic"))
+		panic("handler exploded")
+	})
+
+	rec := doRequest(t, r, "/boom", "gzip")
+	if rec.Code == 0 || (rec.Code >= 200 && rec.Code < 300) {
+		// gin.Recovery() turns the panic into a 500. A 2xx or 0 means
+		// the panic crossed the middleware boundary uncleaned.
+		t.Fatalf("panic did not abort cleanly, status=%d", rec.Code)
+	}
+	// Run another request through the same engine to verify the pool
+	// state isn't poisoned (Reset/Close called on the recycled writer).
+	r.GET("/healthy", func(c *gin.Context) {
+		c.Data(200, "text/plain", []byte(strings.Repeat("ok", 1000)))
+	})
+	rec2 := doRequest(t, r, "/healthy", "gzip")
+	if rec2.Code != 200 {
+		t.Fatalf("post-panic request failed, status=%d (sync.Pool poisoned?)", rec2.Code)
+	}
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s

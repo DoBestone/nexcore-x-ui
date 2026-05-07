@@ -4,11 +4,63 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 
 	"nexcore-x-ui/database/model"
 )
+
+// ValidateShareHostSyntactic enforces format constraints on the host
+// component of a share link. It rejects:
+//   - empty / >253 chars
+//   - whitespace, CRLF, '#', '?', '/', '\\' (link / header injection)
+//   - invalid IP literal in [..]
+//   - hostname labels with empty / >63 chars / non-[a-zA-Z0-9-_] / leading-trailing '-'
+//
+// Returns (cleaned_host, "") on success or ("", reason) on rejection.
+// No whitelist check — callers that want to enforce settings.subAllowedHosts
+// do that themselves on top of this helper. Both the panel-session path
+// (api_panel.go::inboundLinks, where Host is c.Request.Host) and the
+// API-token path (api/v1.go::validateShareHost, where host is the
+// caller-supplied query) funnel through this function so the syntactic
+// invariants stay in one place.
+func ValidateShareHostSyntactic(host string) (string, string) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", "host parameter is required"
+	}
+	if len(host) > 253 {
+		return "", "host too long"
+	}
+	for _, r := range host {
+		if r == ' ' || r == '\n' || r == '\r' || r == '\t' || r == '#' || r == '?' || r == '/' || r == '\\' {
+			return "", "host contains forbidden characters"
+		}
+	}
+	candidate := host
+	if strings.HasPrefix(candidate, "[") && strings.HasSuffix(candidate, "]") {
+		if ip := net.ParseIP(candidate[1 : len(candidate)-1]); ip == nil || ip.To16() == nil {
+			return "", "invalid IPv6 literal"
+		}
+	} else if ip := net.ParseIP(candidate); ip == nil {
+		for _, label := range strings.Split(candidate, ".") {
+			if label == "" || len(label) > 63 {
+				return "", "invalid hostname label"
+			}
+			for i, r := range label {
+				ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+				if !ok {
+					return "", "invalid character in hostname"
+				}
+				if (i == 0 || i == len(label)-1) && r == '-' {
+					return "", "hostname label cannot start/end with hyphen"
+				}
+			}
+		}
+	}
+	return host, ""
+}
 
 // ShareService renders xray inbound rows into client-share URIs
 // (vmess://, vless://, trojan://, ss://). The server address used in the

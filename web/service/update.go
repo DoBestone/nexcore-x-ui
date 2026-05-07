@@ -407,20 +407,25 @@ func chownRecursiveRoot(root string) error {
 	})
 }
 
-// repoCoordinates returns the GitHub owner/repo used for self-update. The
-// defaults point at the canonical NexCore x-ui repository; operators running
-// a fork override via NEXCORE_GH_OWNER / NEXCORE_GH_REPO env vars on the
-// systemd unit.
+// updateRepoOwner / updateRepoName control the self-update source. They are
+// compile-time constants by default; forks can override at build time via
+//
+//	go build -ldflags '-X nexcore-x-ui/web/service.updateRepoOwner=foo \
+//	                   -X nexcore-x-ui/web/service.updateRepoName=bar'
+//
+// Earlier versions read NEXCORE_GH_OWNER / NEXCORE_GH_REPO at runtime, but
+// that turned the systemd unit's Environment= into a self-update hijack
+// surface: anyone able to edit the unit (already root, but a useful step
+// for an attacker establishing persistence) could redirect ApplyLatest to
+// a release they control. Compile-time only closes that window without
+// blocking legitimate fork builds.
+var (
+	updateRepoOwner = "DoBestone"
+	updateRepoName  = "nexcore-x-ui"
+)
+
 func repoCoordinates() (owner, repo string) {
-	owner = os.Getenv("NEXCORE_GH_OWNER")
-	if owner == "" {
-		owner = "DoBestone"
-	}
-	repo = os.Getenv("NEXCORE_GH_REPO")
-	if repo == "" {
-		repo = "nexcore-x-ui"
-	}
-	return
+	return updateRepoOwner, updateRepoName
 }
 
 func downloadFile(url, dst string) error {
@@ -460,6 +465,14 @@ func extractTarGz(archive, dst string) error {
 		return err
 	}
 	tr := tar.NewReader(gz)
+	// totalWritten caps cumulative bytes written across ALL entries in the
+	// tarball. The download itself is capped at maxTarballSize, but a
+	// gzip-bombed archive can decompress to many times its on-disk size:
+	// without a cumulative ceiling each entry independently allowed up to
+	// maxTarballSize, so an N-entry malicious tarball could fill /tmp.
+	// 256MB total is more than 10× any legitimate panel build's extracted
+	// footprint while still fitting on the 1H1G machines we deploy to.
+	var totalWritten int64
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -495,11 +508,26 @@ func extractTarGz(archive, dst string) error {
 			if err != nil {
 				return err
 			}
-			if _, err := io.Copy(w, io.LimitReader(tr, maxTarballSize)); err != nil {
+			// Per-entry limit prevents one gigantic file from filling /tmp;
+			// the cumulative check below enforces the total budget across
+			// all entries. We compute remaining BEFORE the copy so a single
+			// large entry can still consume up to the leftover budget but
+			// not exceed it.
+			remaining := maxTarballSize - totalWritten
+			if remaining <= 0 {
 				w.Close()
+				return fmt.Errorf("tar: cumulative size exceeds %d bytes", int64(maxTarballSize))
+			}
+			n, err := io.Copy(w, io.LimitReader(tr, remaining+1))
+			w.Close()
+			if err != nil {
 				return err
 			}
-			w.Close()
+			totalWritten += n
+			if totalWritten > maxTarballSize {
+				return fmt.Errorf("tar: cumulative size %d exceeds limit %d bytes",
+					totalWritten, int64(maxTarballSize))
+			}
 		case tar.TypeSymlink, tar.TypeLink:
 			return fmt.Errorf("tar: rejected entry %q (symlink/hardlink not allowed)", h.Name)
 		default:

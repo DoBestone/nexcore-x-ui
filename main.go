@@ -20,8 +20,26 @@ import (
 	"nexcore-x-ui/web/service"
 )
 
+// buildTag is injected at link time by the release workflow:
+//
+//	go build -ldflags '-X main.buildTag=${{ github.ref_name }}' …
+//
+// Stays empty in dev / non-release builds. We log it on boot so the
+// release manager can spot a mismatch between the git tag CI used and
+// the config/version embedded in the binary — those drifting apart is
+// the most common release bug, and a 1-line warning catches it before
+// the dashboard lies to operators.
+var buildTag string
+
 func runWebServer() {
 	log.Printf("%v %v", config.GetName(), config.GetVersion())
+	if buildTag != "" {
+		expected := "v" + config.GetVersion()
+		if buildTag != expected {
+			log.Printf("WARNING: build tag %q does not match embedded version %q — release mismatch?",
+				buildTag, expected)
+		}
+	}
 
 	switch config.GetLogLevel() {
 	case config.Debug:
@@ -373,7 +391,10 @@ func mintMagicLink(ttlSeconds int, note, host string) {
 		host = autoDetectHost()
 	}
 	scheme := "http"
-	url := fmt.Sprintf("%s://%s/panel-login/%s", scheme, host, t.Token)
+	// Token in URL fragment, NOT path. The fragment never reaches
+	// server logs / proxy logs / Referer headers; the SPA reads it
+	// client-side and POSTs it to /panel-login/consume.
+	url := fmt.Sprintf("%s://%s/magic-login#tk=%s", scheme, host, t.Plaintext)
 	fmt.Println(url)
 }
 

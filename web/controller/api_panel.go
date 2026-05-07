@@ -2,6 +2,7 @@ package controller
 
 import (
 	"embed"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -310,9 +311,14 @@ func (a *APIPanelController) onlineIPsByEmail(c *gin.Context) {
 }
 
 // inboundLinks — 返回该 inbound 下每个 email 客户端的分享链接(email→link)。
-// host 默认取请求 Host(去 port);用户也可显式 ?host= 覆盖。注意这个路由
-// 是 panel session-auth 而不是 /api/v1 token-auth,所以不走 subAllowedHosts
-// 白名单 — 已经登录的面板用户本来就能看 settings,host 决策权交给他。
+//
+// host 默认取请求 Host(去 port);用户也可显式 ?host= 覆盖。这个路由是
+// panel session-auth 而不是 /api/v1 token-auth,所以不强制 subAllowedHosts
+// 白名单 —— 已经登录的面板用户本来就能改 settings,白名单对他没意义。但
+// **必须**走 ValidateShareHostSyntactic:c.Request.Host 是客户端可控的
+// header,被 CRLF / `/` / 空白一注入,生成的分享链接就跑到 attacker.example
+// 去了。审计指出过这条 host header 注入面;Validate* 把字符层面收掉后,
+// panel 路径剩下的就只是纯白名单决策。
 func (a *APIPanelController) inboundLinks(c *gin.Context) {
 	id := int(getUriId(c))
 	host := strings.TrimSpace(c.Query("host"))
@@ -322,7 +328,12 @@ func (a *APIPanelController) inboundLinks(c *gin.Context) {
 			host = host[:i]
 		}
 	}
-	links, err := a.shareService.LinksByEmail(id, host)
+	cleaned, reason := service.ValidateShareHostSyntactic(host)
+	if reason != "" {
+		jsonObj(c, nil, errors.New("invalid host: "+reason))
+		return
+	}
+	links, err := a.shareService.LinksByEmail(id, cleaned)
 	if err != nil {
 		jsonObj(c, nil, err)
 		return

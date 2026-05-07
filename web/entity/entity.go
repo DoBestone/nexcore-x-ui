@@ -39,6 +39,11 @@ type AllSetting struct {
 	XrayTemplateConfig string `json:"xrayTemplateConfig" form:"xrayTemplateConfig"`
 
 	TimeLocation string `json:"timeLocation" form:"timeLocation"`
+
+	// 在线 IP webhook 推送 — 上游业务系统跨节点聚合用。Url 空 = 禁用。
+	OnlineWebhookUrl    string `json:"onlineWebhookUrl" form:"onlineWebhookUrl"`
+	OnlineWebhookSecret string `json:"onlineWebhookSecret" form:"onlineWebhookSecret"`
+	OnlineWebhookNodeId string `json:"onlineWebhookNodeId" form:"onlineWebhookNodeId"`
 }
 
 func (s *AllSetting) CheckValid() error {

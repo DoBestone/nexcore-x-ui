@@ -13,25 +13,19 @@ type BaseController struct {
 	userService service.UserService
 }
 
-// checkLogin gates every authenticated panel route. Beyond the basic
-// "is there a session?" question, it verifies the session's snapshot of
-// User.Password still matches what's in the DB. If they diverge — the
-// admin changed credentials, or the row was nuked by `nexcore-x-ui
-// reset` — every existing cookie loses access on its next request,
-// which is what we want: a leaked cookie can't outlive a password
-// rotation.
+// checkLogin gates every authenticated panel route. The cookie carries
+// only (uid, sig); LoadCurrentUser pulls the live row from SQLite and
+// verifies the password fingerprint still matches. If the admin rotated
+// credentials (or `nexcore-x-ui reset` nuked the row), every outstanding
+// cookie's sig diverges and the next request fails — leaked cookies
+// can't outlive a password rotation.
 //
 // The DB hit is one indexed PK lookup; sqlite serves it in microseconds
-// and the result isn't cached because we explicitly want every request
-// to see the freshest credential snapshot.
+// and we cache the resulting *User on gin.Context so downstream handlers
+// (inbound.go, setting.go, api_panel.go) get it for free.
 func (a *BaseController) checkLogin(c *gin.Context) {
-	user := session.GetLoginUser(c)
+	user := session.LoadCurrentUser(c, a.userService.GetFirstUser)
 	if user == nil {
-		a.failLogin(c)
-		return
-	}
-	current, err := a.userService.GetFirstUser()
-	if err != nil || current == nil || current.Id != user.Id || current.Password != user.Password {
 		session.ClearSession(c)
 		a.failLogin(c)
 		return

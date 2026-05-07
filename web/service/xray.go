@@ -175,6 +175,9 @@ func (s *XrayService) RestartXray(isForce bool) error {
 	onlineSvc := GetOnlineIPService()
 	onlineSvc.Start()
 	onlineSvc.OnXrayRestart()
+	// webhook worker 也跟着 OnlineIPService 一起起,Start() 幂等。
+	// URL 没配的话 worker 跑空 tick,几乎零成本。
+	GetOnlineWebhookService().Start()
 	return nil
 }
 

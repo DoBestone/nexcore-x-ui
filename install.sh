@@ -158,6 +158,16 @@ install_panel() {
     cp -a "/tmp/${CMD_NAME}-extract/${CMD_NAME}/." "${INSTALL_DIR}/"
     rm -rf "/tmp/${CMD_NAME}-extract" "${archive}"
 
+    # Force ownership to root:root.
+    # Release tarballs are built on GitHub Actions runners (uid 1001), and
+    # `cp -a` / `tar -xzf` preserve that uid. xray.preflightBinary then
+    # refuses to launch a non-root-owned binary, looping with
+    # "owned by uid 1001". This was v1.0.5; the three upgrade paths
+    # (update.sh / nexcore-x-ui.sh::cmd_update / service/update.go::ApplyLatest)
+    # all chown — install.sh missed it, so a fresh install reproduced
+    # the same failure. Keep this line in lockstep with the other three.
+    chown -R root:root "${INSTALL_DIR}"
+
     chmod +x "${INSTALL_DIR}/${CMD_NAME}"
     [[ -d "${INSTALL_DIR}/bin" ]] && chmod +x "${INSTALL_DIR}/bin/"* 2>/dev/null || true
     [[ -f "${INSTALL_DIR}/${CMD_NAME}.sh" ]] && chmod +x "${INSTALL_DIR}/${CMD_NAME}.sh"

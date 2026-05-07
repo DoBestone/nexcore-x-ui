@@ -28,9 +28,10 @@ import (
 // Tokens stored in the multi-token api_tokens table are SHA256-hashed
 // instead — they do not appear here.
 var sensitiveSettingKeys = map[string]bool{
-	"secret":     true, // gorilla/sessions HMAC key for cookie auth
-	"apiToken":   true, // legacy single-token (multi-token table is hashed)
-	"tgBotToken": true, // Telegram bot token, can post to operator chat
+	"secret":              true, // gorilla/sessions HMAC key for cookie auth
+	"apiToken":            true, // legacy single-token (multi-token table is hashed)
+	"tgBotToken":          true, // Telegram bot token, can post to operator chat
+	"onlineWebhookSecret": true, // HMAC key signing webhook bodies sent to ops backend
 }
 
 // settingCache holds an in-memory copy of every setting row keyed by
@@ -111,6 +112,12 @@ var defaultValueMap = map[string]string{
 	// (legacy behavior). Operators that want to lock down their nodes to
 	// known panel domains set this from the settings UI.
 	"subAllowedHosts": "",
+	// Online IP webhook — pushes per-email IP set deltas to a business
+	// system that aggregates across nodes (multi-node device cap). Empty
+	// URL disables. See OnlineWebhookService for protocol/signing.
+	"onlineWebhookUrl":    "",
+	"onlineWebhookSecret": "",
+	"onlineWebhookNodeId": "",
 }
 
 type SettingService struct {
@@ -399,6 +406,31 @@ func (s *SettingService) GetAPIToken() (string, error) {
 
 func (s *SettingService) SetAPIToken(token string) error {
 	return s.setString("apiToken", token)
+}
+
+// 在线 IP webhook — 给上游业务系统跨节点聚合在线 IP 用,见 OnlineWebhookService。
+func (s *SettingService) GetOnlineWebhookUrl() (string, error) {
+	return s.getString("onlineWebhookUrl")
+}
+
+func (s *SettingService) SetOnlineWebhookUrl(url string) error {
+	return s.setString("onlineWebhookUrl", url)
+}
+
+func (s *SettingService) GetOnlineWebhookSecret() (string, error) {
+	return s.getString("onlineWebhookSecret")
+}
+
+func (s *SettingService) SetOnlineWebhookSecret(v string) error {
+	return s.setString("onlineWebhookSecret", v)
+}
+
+func (s *SettingService) GetOnlineWebhookNodeId() (string, error) {
+	return s.getString("onlineWebhookNodeId")
+}
+
+func (s *SettingService) SetOnlineWebhookNodeId(v string) error {
+	return s.setString("onlineWebhookNodeId", v)
 }
 
 // EnsureAPIToken returns the current API token, generating and persisting a

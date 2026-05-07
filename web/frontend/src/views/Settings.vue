@@ -60,6 +60,25 @@ async function restart() {
   ElMessage.success('已发起重启')
 }
 
+// ---------- 在线 IP webhook 测试 ----------
+const testingWebhook = ref(false)
+async function testWebhook() {
+  if (!all.value?.onlineWebhookUrl) {
+    ElMessage.warning('请先填写并保存 Webhook URL')
+    return
+  }
+  testingWebhook.value = true
+  try {
+    await postForm('xui/setting/testOnlineWebhook')
+    ElMessage.success('已推送一次,请检查业务系统是否收到')
+  } catch (e: unknown) {
+    const msg = (e as { response?: { data?: { msg?: string } } })?.response?.data?.msg || '推送失败'
+    ElMessage.error(msg)
+  } finally {
+    testingWebhook.value = false
+  }
+}
+
 // ---------- magic link ----------
 const magicTtl = ref(600)
 const magicLink = ref('')
@@ -116,6 +135,44 @@ onMounted(() => {
               <el-form-item>
                 <el-button type="primary" :loading="saving" @click="save">保存</el-button>
                 <el-button type="danger" plain @click="restart">重启面板</el-button>
+              </el-form-item>
+            </el-form>
+          </div>
+        </el-card>
+      </el-tab-pane>
+
+      <el-tab-pane label="在线 IP Webhook" lazy>
+        <el-card>
+          <p class="nx-muted">
+            把本节点的"email → 在线 IP"快照定时推给上游业务系统,用于多节点共享
+            "max devices" 配额聚合。每 5 秒比对一次状态,有变化才发出。
+            URL 留空 = 禁用。
+          </p>
+          <p class="nx-muted">
+            POST 请求体:<code>{ node_id, ts, online: { email: [ip,...] } }</code>。
+            配置了 secret 时附 <code>X-Nx-Signature: hex(HMAC-SHA256(secret, body))</code>。
+            语义为"幂等替换" — 业务系统应把当前 node_id 名下状态完全覆盖为 online 字段内容。
+          </p>
+          <div v-if="all">
+            <el-form label-width="160px" label-position="left">
+              <el-form-item label="Webhook URL">
+                <el-input
+                  v-model="all.onlineWebhookUrl"
+                  placeholder="https://biz.example.com/api/x-ui/online"
+                />
+              </el-form-item>
+              <el-form-item label="HMAC Secret">
+                <el-input v-model="all.onlineWebhookSecret" type="password" show-password />
+              </el-form-item>
+              <el-form-item label="Node ID">
+                <el-input
+                  v-model="all.onlineWebhookNodeId"
+                  placeholder="留空 = 用 hostname"
+                />
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+                <el-button :loading="testingWebhook" @click="testWebhook">测试推送</el-button>
               </el-form-item>
             </el-form>
           </div>

@@ -41,6 +41,14 @@ func (a *SettingController) initRouter(g *gin.RouterGroup) {
 	g.POST("/updateUser", a.updateUser)
 	g.POST("/restartPanel", a.restartPanel)
 	g.POST("/magicLink", a.createMagicLink)
+	g.POST("/testOnlineWebhook", a.testOnlineWebhook)
+}
+
+// testOnlineWebhook 立即触发一次推送(绕过 5s tick),用于设置面板上"测试推送"
+// 按钮。结果回到调用方好显示给操作员是否真的推到了业务系统。
+func (a *SettingController) testOnlineWebhook(c *gin.Context) {
+	err := service.GetOnlineWebhookService().SendNow()
+	jsonMsg(c, "测试推送", err)
 }
 
 func (a *SettingController) getAllSetting(c *gin.Context) {
@@ -107,7 +115,7 @@ func (a *SettingController) createMagicLink(c *gin.Context) {
 	}
 	_ = c.ShouldBind(&body)
 
-	t, err := a.magicService.CreateMagicToken(time.Duration(body.TtlSeconds)*time.Second, body.Note)
+	created, err := a.magicService.CreateMagicToken(time.Duration(body.TtlSeconds)*time.Second, body.Note)
 	if err != nil {
 		jsonMsg(c, "生成快捷登录链接", err)
 		return
@@ -122,15 +130,19 @@ func (a *SettingController) createMagicLink(c *gin.Context) {
 	if basePath == "" {
 		basePath = "/"
 	}
-	url := scheme + "://" + host + basePath + "panel-login/" + t.Token
+	// Plaintext is returned exactly once; the DB row carries the SHA256.
+	// Token goes in the URL fragment so it never reaches server access
+	// logs, proxies, or Referer headers — see web.go::handleMagicConsume
+	// for the full rationale.
+	url := scheme + "://" + host + basePath + "magic-login#tk=" + created.Plaintext
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":   true,
+		"success": true,
 		"obj": gin.H{
-			"url":       url,
-			"token":     t.Token,
-			"expiresAt": t.ExpiresAt,
-			"ttlSeconds": t.ExpiresAt - t.CreatedAt,
+			"url":        url,
+			"token":      created.Plaintext,
+			"expiresAt":  created.Row.ExpiresAt,
+			"ttlSeconds": created.Row.ExpiresAt - created.Row.CreatedAt,
 		},
 	})
 }

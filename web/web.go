@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 	"nexcore-x-ui/config"
+	"nexcore-x-ui/database"
 	"nexcore-x-ui/logger"
 	"nexcore-x-ui/util/common"
 	"nexcore-x-ui/web/controller"
@@ -40,6 +41,45 @@ import (
 //
 //go:embed all:frontend/dist
 var spaDistFS embed.FS
+
+// walCheckpointJob implements cron.Job. We don't pull this into web/job/
+// because it has zero state and zero deps beyond database — a separate
+// file would be more ceremony than the body. Errors are logged but
+// non-fatal: if the DB is busy we'll retry on the next tick.
+type walCheckpointJob struct{}
+
+func (walCheckpointJob) Run() {
+	db := database.GetDB()
+	if db == nil {
+		return
+	}
+	if err := db.Exec("PRAGMA wal_checkpoint(PASSIVE)").Error; err != nil {
+		logger.Debugf("wal_checkpoint passive: %v", err)
+	}
+}
+
+// configureTrustedProxies wires gin's trusted-proxy list. Reads
+// NEXCORE_TRUSTED_PROXIES (comma-separated CIDRs / IPs) from env. Empty
+// or unset = no proxies trusted (the safe default). Returns an error if
+// gin itself rejects the list (bad CIDR, etc.).
+func configureTrustedProxies(engine *gin.Engine) error {
+	raw := strings.TrimSpace(os.Getenv("NEXCORE_TRUSTED_PROXIES"))
+	if raw == "" {
+		return engine.SetTrustedProxies(nil)
+	}
+	parts := strings.Split(raw, ",")
+	cidrs := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			cidrs = append(cidrs, p)
+		}
+	}
+	if len(cidrs) == 0 {
+		return engine.SetTrustedProxies(nil)
+	}
+	return engine.SetTrustedProxies(cidrs)
+}
 
 // securityHeadersMiddleware applies a conservative set of headers to
 // every panel response. They cost nothing on the server and make a
@@ -149,10 +189,27 @@ func (w *gzipResponseWriter) Write(p []byte) (int, error) {
 	// Content-Type via http.DetectContentType when not set.
 	ct := w.Header().Get("Content-Type")
 	if ce := w.Header().Get("Content-Encoding"); ce != "" {
-		// Some upstream already encoded it.
+		// Upstream already encoded it. If we'd buffered any bytes from
+		// earlier Write calls (handler did Write(prefix) then set
+		// Content-Encoding, then Write(rest)), flush them first — they
+		// are part of that already-encoded body and would otherwise be
+		// silently dropped.
+		if len(w.buffered) > 0 {
+			if _, err := w.ResponseWriter.Write(w.buffered); err != nil {
+				return 0, err
+			}
+			w.buffered = nil
+		}
 		return w.ResponseWriter.Write(p)
 	}
 	if isCompressedContentType(ct) {
+		// Same flush-before-bypass invariant for image/* etc.
+		if len(w.buffered) > 0 {
+			if _, err := w.ResponseWriter.Write(w.buffered); err != nil {
+				return 0, err
+			}
+			w.buffered = nil
+		}
 		return w.ResponseWriter.Write(p)
 	}
 	w.buffered = append(w.buffered, p...)
@@ -167,6 +224,19 @@ func (w *gzipResponseWriter) Write(p []byte) (int, error) {
 	}
 	w.buffered = nil
 	return len(p), nil
+}
+
+// WriteString routes back through Write so callers using
+// io.WriteString(c.Writer, …) or c.Writer.WriteString(…) hit the same
+// buffer / threshold / Content-Encoding logic as Write([]byte). Without
+// this override Gin's embedded responseWriter implementation would
+// invoke ResponseWriter.Write directly, silently bypassing both gzip
+// compression AND the small-response buffer flush — i.e. exactly the
+// v1.0.4 ERR_CONTENT_LENGTH_MISMATCH bug, just via a different entry
+// point. This is the only public method on the interface that needs an
+// explicit forward; ReadFrom / Hijack / etc. don't write the body.
+func (w *gzipResponseWriter) WriteString(s string) (int, error) {
+	return w.Write([]byte(s))
 }
 
 func (w *gzipResponseWriter) Flush() {
@@ -398,6 +468,26 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	// still costs sprintf+time formatting per request. Recovery alone
 	// is what we actually want from "Default".
 	engine := gin.New()
+	// Trusted-proxy policy.
+	//
+	// gin's default is "trust every X-Forwarded-For header from anyone",
+	// which means c.ClientIP() returns whatever the caller wants when the
+	// panel is exposed directly to the public internet. The login
+	// throttler keys on c.ClientIP(), so that default is a free
+	// brute-force-bypass: the attacker simply rotates X-Forwarded-For per
+	// request and never trips the lockout.
+	//
+	// Default here is `nil` — no proxy is trusted, c.ClientIP() ignores
+	// X-Forwarded-For and returns the direct TCP peer. Operators who run
+	// the panel behind a reverse proxy (Caddy, nginx, Cloudflare Tunnel)
+	// set NEXCORE_TRUSTED_PROXIES to a comma-separated list of CIDRs of
+	// the front-end's source addresses. SetTrustedProxies returning an
+	// error here would mean a typo in the env var; we log and fall back
+	// to the safe default so a misconfiguration can't open the bypass.
+	if err := configureTrustedProxies(engine); err != nil {
+		logger.Warningf("trusted proxies misconfigured (%v); falling back to direct peer only", err)
+		_ = engine.SetTrustedProxies(nil)
+	}
 	engine.Use(gin.Recovery())
 	if config.IsDebug() {
 		// Only spend the formatting budget when debug logs are wanted.
@@ -488,9 +578,12 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	}
 	engine.StaticFS(basePath+"assets", http.FS(assetsSub))
 
-	// SPA 入口:base path 根 GET → index.html。SPA 用 hash router,
-	// 但用户直接访问 /xui/inbounds 之类老路径时这个兜底负责把 SPA 壳
-	// 给浏览器,后续路由由 vue-router 处理。
+	// SPA 入口:base path 根 GET → index.html。SPA 用 createWebHistory,
+	// 任何匹配不到 API/asset 的 GET 都通过 noRoute 兜底回这里,客户端 vue-router 接管。
+	//
+	// 同时把 basePath 注入到 HTML 里,替换 __NX_BASE__ 占位符。这样同一份
+	// SPA bundle 部署在 "/" 和 "/admin/" 都能跑:axios 用它做 baseURL,
+	// vue-router 用它做 history base,前端不再硬编码任何前缀。
 	indexHandler := func(c *gin.Context) {
 		f, err := distRoot.Open("index.html")
 		if err != nil {
@@ -503,8 +596,21 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 			c.String(http.StatusInternalServerError, "read index.html: "+err.Error())
 			return
 		}
+		// JS-string-safe: basePath comes from settings (operator-controlled,
+		// so already trusted), but defense-in-depth — escape the only
+		// chars that could break the inline `window.__NX_BASE__ = "..."`
+		// statement: backslash, double-quote, and the literal "</" that
+		// would close the surrounding <script> tag prematurely. Order
+		// matters: backslash MUST come first so the others' replacement
+		// backslashes aren't double-escaped.
+		safeBase := strings.NewReplacer(
+			`\`, `\\`,
+			`"`, `\"`,
+			`</`, `<\/`,
+		).Replace(basePath)
+		injected := strings.ReplaceAll(string(data), "__NX_BASE__", safeBase)
 		c.Header("Cache-Control", "no-cache")
-		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(injected))
 	}
 	engine.GET(basePath, indexHandler)
 	// v2.0 SPA 兜底:面板下任何没匹配到 API/asset 路由的 GET 全部返回
@@ -535,36 +641,76 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	apiGroup := engine.Group(basePath + "api/v1")
 	s.apiV1 = api.NewV1Controller(apiGroup)
 
-	// Magic-link login endpoint. Public (no API token / no panel session),
-	// authentication is by the one-time token in the URL.
-	g.GET("panel-login/:token", s.handleMagicLogin)
+	// Magic-link login.
+	//
+	// Old design: GET /panel-login/<plaintext-token> — server consumed the
+	// token from the URL path, set the cookie, redirected. That put the
+	// plaintext token into every layer of the request lifecycle: gin
+	// access logs, any reverse proxy's access log, the browser history,
+	// and (when the user clicked a link from the freshly-loaded SPA) the
+	// Referer header to whatever the next outbound request was. Even
+	// after the token was consumed, those secondary log lines persisted
+	// the now-dead-but-once-valid token forever.
+	//
+	// New design: the URL the operator shares is
+	//
+	//	{base}magic-login#tk=<plaintext>
+	//
+	// — the token lives in the fragment, which browsers never send over
+	// the wire. Server side, /magic-login is just an SPA route (resolved
+	// by noRoute → indexHandler). The SPA route component reads the
+	// fragment, POSTs the token to /panel-login/consume, gets a session
+	// cookie back, and navigates to /dashboard. The fragment is cleared
+	// from history.replaceState so a back-button trip doesn't leak it
+	// either.
+	//
+	// /panel-login/consume is the only HTTP entry point that ever sees
+	// the plaintext, and only as a POST body — so it's never in any URL
+	// that gets logged.
+	g.POST("panel-login/consume", s.handleMagicConsume)
 
 	return engine, nil
 }
 
-func (s *Server) handleMagicLogin(c *gin.Context) {
-	token := c.Param("token")
-	if err := s.magicService.ConsumeMagicToken(token); err != nil {
-		c.String(http.StatusUnauthorized, "magic link invalid or expired")
+// handleMagicConsume validates a magic token POSTed by the SPA and
+// promotes the request to a logged-in panel session. Always returns
+// 401 on any failure mode so the caller can't distinguish "no such
+// token" from "expired" from "already used".
+func (s *Server) handleMagicConsume(c *gin.Context) {
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Token) == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"msg":     "invalid magic link",
+		})
+		return
+	}
+	if err := s.magicService.ConsumeMagicToken(body.Token); err != nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"msg":     "magic link invalid or expired",
+		})
 		return
 	}
 	user, err := s.userService.GetFirstUser()
 	if err != nil || user == nil {
-		c.String(http.StatusInternalServerError, "no admin user available")
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"msg":     "no admin user available",
+		})
 		return
 	}
 	if err := session.SetLoginUser(c, user); err != nil {
-		c.String(http.StatusInternalServerError, "session save failed")
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"msg":     "session save failed",
+		})
 		return
 	}
 	logger.Infof("magic-link login as %s from %s", user.Username, c.ClientIP())
-	basePath := c.GetString("base_path")
-	if basePath == "" {
-		basePath = "/"
-	}
-	// v2.0:SPA 入口在 base path 根,hash router 自动把 / 解析到
-	// /#/dashboard。原来的 xui/ 老路径已经废弃。
-	c.Redirect(http.StatusFound, basePath)
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
 func (s *Server) initI18n(engine *gin.Engine) error {
@@ -687,6 +833,18 @@ func (s *Server) startTask() {
 
 	// 每 30 秒检查一次 inbound 流量超出和到期的情况
 	s.cron.AddJob("@every 30s", job.NewCheckInboundJob())
+
+	// WAL checkpoint cron.
+	//
+	// SQLite WAL mode 写入会累积到 *.db-wal 文件,默认 1000 页(~4MB)
+	// autocheckpoint 触发一次合并到主库。在持续写入(流量统计每 10s
+	// flush)+ 长时间不重启的节点机上,这个文件能涨到几十 MB,占满 1G
+	// 机器的 inode/磁盘缓存。每 5 分钟主动跑 PASSIVE checkpoint 把它
+	// 压回主库,不阻塞读写、不影响运行中的事务,代价接近零。
+	//
+	// 不用 FULL/RESTART/TRUNCATE:那几种会等所有 reader 退出再合并,
+	// 长事务下会阻塞;PASSIVE 只合并能合并的部分,合不上也无害。
+	s.cron.AddJob("@every 5m", walCheckpointJob{})
 	// 每一天提示一次流量情况,上海时间8点30
 	var entry cron.EntryID
 	isTgbotenabled, err := s.settingService.GetTgbotenabled()

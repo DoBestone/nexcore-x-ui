@@ -169,6 +169,36 @@ func (s *ClientTrafficService) AddTrafficByEmail(traffics []*xray.Traffic, nowMs
 	if len(traffics) == 0 {
 		return disabled, nil
 	}
+
+	// Step 1: aggregate deltas per email IN MEMORY, dedup the input slice.
+	// xray's gRPC stats can report the same email twice in one tick under
+	// load; folding them up front lets us issue exactly one UPDATE per
+	// email below regardless of how many Traffic rows the caller passed.
+	type delta struct {
+		up   int64
+		down int64
+	}
+	deltas := make(map[string]*delta, len(traffics))
+	emails := make([]string, 0, len(traffics))
+	for _, t := range traffics {
+		if t.IsInbound {
+			continue // 这里只处理 user 级;inbound 级走 InboundService.AddTraffic
+		}
+		if t.Tag == "" {
+			continue // stats key 解析失败,没 email 无法定位 client
+		}
+		if d, ok := deltas[t.Tag]; ok {
+			d.up += t.Up
+			d.down += t.Down
+		} else {
+			deltas[t.Tag] = &delta{up: t.Up, down: t.Down}
+			emails = append(emails, t.Tag)
+		}
+	}
+	if len(emails) == 0 {
+		return disabled, nil
+	}
+
 	db := database.GetDB()
 	tx := db.Begin()
 	var err error
@@ -179,51 +209,62 @@ func (s *ClientTrafficService) AddTrafficByEmail(traffics []*xray.Traffic, nowMs
 			tx.Commit()
 		}
 	}()
-	for _, t := range traffics {
-		if t.IsInbound {
-			continue // 这里只处理 user 级;inbound 级走 InboundService.AddTraffic
+
+	// Step 2: ONE SELECT for every email this tick, replacing the per-row
+	// `First()` from the old impl. That `First` was an N+1 hot path: for a
+	// 50-client panel busy enough to flush every 10s, it issued ~50 extra
+	// indexed queries per tick on top of the UPDATEs. Loading the rows up
+	// front lets the to-disable decision happen in memory; the only DB
+	// writes left are one UPDATE per email.
+	var rows []model.ClientTraffic
+	if err = tx.Where("email IN ?", emails).Find(&rows).Error; err != nil {
+		return disabled, err
+	}
+	rowByEmail := make(map[string]*model.ClientTraffic, len(rows))
+	for i := range rows {
+		rowByEmail[rows[i].Email] = &rows[i]
+	}
+
+	// Step 3: one UPDATE per email, with up / down / (optional) enable
+	// folded into a single statement. We also skip the UPDATE entirely
+	// for the "stats reported zero new bytes AND nothing to disable" path
+	// — common for idle email entries that xray still emits keys for.
+	for email, d := range deltas {
+		ct, ok := rowByEmail[email]
+		if !ok {
+			// stats 给了个 DB 里不存在的 email — 通常是 client 刚被删
+			// 但 xray 还没 reload。这一轮的字节数被丢弃,等下一轮 xray
+			// 用新 inbound 重启就消停了。原实现也是这个语义。
+			continue
 		}
-		if t.Tag == "" {
-			continue // 没有 email 无法定位 client(stats key 解析失败)
-		}
-		// xray stats 的 user key 形如 "alice",直接是 email — 我们存
-		// 的就是这个值。如果 stats 给的是 "user>>>alice>>>traffic" 之类
-		// 的,xray binary 解析层已经在 Traffic.Tag 给我们留 alice。
-		if err = tx.Model(&model.ClientTraffic{}).
-			Where("email = ?", t.Tag).
-			UpdateColumn("up", gorm.Expr("up + ?", t.Up)).
-			UpdateColumn("down", gorm.Expr("down + ?", t.Down)).
-			Error; err != nil {
-			return disabled, err
-		}
-		// 顺手 check 是否到期 / 触顶,需要的话写 enable=false。
-		var ct model.ClientTraffic
-		if err = tx.Where("email = ?", t.Tag).First(&ct).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				// stats 给了一个数据库里没有的 email — 可能 client 刚
-				// 被删但 xray 还没 reload。跳过,不算错误。
-				err = nil
-				continue
-			}
-			return disabled, err
-		}
-		if !ct.Enable {
-			continue // 已经 disabled,不重复
-		}
+		newUp := ct.Up + d.up
+		newDown := ct.Down + d.down
 		shouldDisable := false
-		if ct.Total > 0 && (ct.Up+ct.Down) >= ct.Total {
-			shouldDisable = true
+		if ct.Enable {
+			if ct.Total > 0 && (newUp+newDown) >= ct.Total {
+				shouldDisable = true
+			}
+			if ct.ExpiryTime > 0 && nowMs >= ct.ExpiryTime {
+				shouldDisable = true
+			}
 		}
-		if ct.ExpiryTime > 0 && nowMs >= ct.ExpiryTime {
-			shouldDisable = true
+		if d.up == 0 && d.down == 0 && !shouldDisable {
+			continue
+		}
+		updates := map[string]interface{}{
+			"up":   newUp,
+			"down": newDown,
 		}
 		if shouldDisable {
-			if err = tx.Model(&model.ClientTraffic{}).
-				Where("email = ?", t.Tag).
-				Update("enable", false).Error; err != nil {
-				return disabled, err
-			}
-			disabled = append(disabled, t.Tag)
+			updates["enable"] = false
+		}
+		if err = tx.Model(&model.ClientTraffic{}).
+			Where("id = ?", ct.Id).
+			Updates(updates).Error; err != nil {
+			return disabled, err
+		}
+		if shouldDisable {
+			disabled = append(disabled, email)
 		}
 	}
 	return disabled, nil

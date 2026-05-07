@@ -1,11 +1,21 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { basePath } from '@/utils/base'
 
 const routes: RouteRecordRaw[] = [
   {
     path: '/login',
     name: 'login',
     component: () => import('@/views/Login.vue'),
+    meta: { public: true }
+  },
+  {
+    // 快捷登录链接落地页 — 后端把 token 放在 URL 片段(#tk=...),
+    // 这条公共路由只负责加载 SPA 壳,组件读取 location.hash 后调
+    // POST /xui/api/panel-login/consume 换 cookie,再跳 /dashboard。
+    path: '/magic-login',
+    name: 'magic-login',
+    component: () => import('@/views/MagicLogin.vue'),
     meta: { public: true }
   },
   {
@@ -49,7 +59,10 @@ const routes: RouteRecordRaw[] = [
 ]
 
 const router = createRouter({
-  history: createWebHistory('/'),
+  // basePath comes from window.__NX_BASE__ injected by the Go server, so
+  // the SPA works under any operator-configured base ("/" by default,
+  // "/admin/" if mounted behind a path prefix).
+  history: createWebHistory(basePath),
   routes
 })
 

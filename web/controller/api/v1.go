@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -1038,53 +1037,21 @@ func (a *V1Controller) xrayTemplatePut(c *gin.Context) {
 // pointing at attacker.example. Constraining host to known names is a
 // cheap way to neutralize that.
 func (a *V1Controller) validateShareHost(host string) (string, string) {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return "", "host parameter is required"
-	}
-	if len(host) > 253 {
-		return "", "host too long"
-	}
-	// Reject obvious abuse before we even look at the contents.
-	for _, r := range host {
-		if r == ' ' || r == '\n' || r == '\r' || r == '\t' || r == '#' || r == '?' || r == '/' || r == '\\' {
-			return "", "host contains forbidden characters"
-		}
-	}
-	// Allow bare hostname, IPv4, IPv6 in brackets. ParseIP/host helpers:
-	candidate := host
-	if strings.HasPrefix(candidate, "[") && strings.HasSuffix(candidate, "]") {
-		if ip := net.ParseIP(candidate[1 : len(candidate)-1]); ip == nil || ip.To16() == nil {
-			return "", "invalid IPv6 literal"
-		}
-	} else if ip := net.ParseIP(candidate); ip == nil {
-		// Treat as hostname — check labels.
-		for _, label := range strings.Split(candidate, ".") {
-			if label == "" || len(label) > 63 {
-				return "", "invalid hostname label"
-			}
-			for i, r := range label {
-				ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
-				if !ok {
-					return "", "invalid character in hostname"
-				}
-				if (i == 0 || i == len(label)-1) && r == '-' {
-					return "", "hostname label cannot start/end with hyphen"
-				}
-			}
-		}
+	cleaned, reason := service.ValidateShareHostSyntactic(host)
+	if reason != "" {
+		return "", reason
 	}
 	// Optional whitelist via setting. Empty / missing = "any valid host".
 	if allowed, _ := a.settingService.GetSubAllowedHosts(); allowed != "" {
-		want := strings.ToLower(host)
+		want := strings.ToLower(cleaned)
 		for _, h := range strings.Split(allowed, ",") {
 			if strings.ToLower(strings.TrimSpace(h)) == want {
-				return host, ""
+				return cleaned, ""
 			}
 		}
 		return "", "host not in subAllowedHosts whitelist"
 	}
-	return host, ""
+	return cleaned, ""
 }
 
 func (a *V1Controller) inboundLinks(c *gin.Context) {
@@ -1256,22 +1223,24 @@ type magicTokenReq struct {
 func (a *V1Controller) createMagicToken(c *gin.Context) {
 	var req magicTokenReq
 	_ = c.ShouldBindJSON(&req) // empty body is allowed
-	t, err := a.magicService.CreateMagicToken(time.Duration(req.TtlSeconds)*time.Second, req.Note)
+	created, err := a.magicService.CreateMagicToken(time.Duration(req.TtlSeconds)*time.Second, req.Note)
 	if err != nil {
 		Internal(c, "magic_token_failed", err)
 		return
 	}
-	// Build a relative URL the caller can prepend the panel host to.
+	// Plaintext is returned exactly once; the DB row carries SHA256.
+	// Token in URL fragment, NOT path — keeps it out of access logs,
+	// proxy logs, and Referer. See web/web.go::handleMagicConsume.
 	basePath := c.GetString("base_path")
 	if basePath == "" {
 		basePath = "/"
 	}
-	relativeURL := basePath + "panel-login/" + t.Token
+	relativeURL := basePath + "magic-login#tk=" + created.Plaintext
 	Created(c, gin.H{
-		"token":       t.Token,
-		"createdAt":   t.CreatedAt,
-		"expiresAt":   t.ExpiresAt,
-		"note":        t.Note,
+		"token":       created.Plaintext,
+		"createdAt":   created.Row.CreatedAt,
+		"expiresAt":   created.Row.ExpiresAt,
+		"note":        created.Row.Note,
 		"relativeUrl": relativeURL,
 		"hint":        "prepend the panel's public origin (scheme + host[:port]) to relativeUrl",
 	})

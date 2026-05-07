@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -12,7 +14,7 @@ import (
 )
 
 const (
-	magicTokenLength    = 40
+	magicTokenLength     = 40
 	magicTokenDefaultTTL = 10 * time.Minute
 	magicTokenMaxTTL     = 24 * time.Hour
 	magicTokenGCAfter    = 7 * 24 * time.Hour
@@ -28,12 +30,33 @@ var (
 	ErrMagicTokenInvalid = errors.New("magic token invalid or already used")
 )
 
+// CreatedMagicToken carries the plaintext returned to the operator at
+// creation time. Plaintext is intentionally only available here — the
+// stored row carries the SHA256 hash, never the secret. Same model as
+// APITokenService.
+type CreatedMagicToken struct {
+	Row       *model.MagicToken
+	Plaintext string
+}
+
 type MagicTokenService struct{}
+
+// hashMagicToken hex-encodes SHA256(plain). We store this in
+// magic_tokens.token instead of the plaintext so a leaked DB doesn't
+// give an attacker a 10-minute login window for every unused row. Plain
+// SHA256 is sufficient because the plaintext is 40 chars of high-entropy
+// random output (random.Seq) — bcrypt cost would be a no-op against that
+// search space and slow down every link click.
+func hashMagicToken(plain string) string {
+	sum := sha256.Sum256([]byte(plain))
+	return hex.EncodeToString(sum[:])
+}
 
 // CreateMagicToken issues a single-use, time-bounded login token. ttl is
 // clamped to [1m, 24h]; default 10m. Note is free-form context for audit
-// (e.g. "remote support 2026-05-06").
-func (s *MagicTokenService) CreateMagicToken(ttl time.Duration, note string) (*model.MagicToken, error) {
+// (e.g. "remote support 2026-05-06"). The plaintext is returned only via
+// CreatedMagicToken.Plaintext — the row stored in the DB carries the hash.
+func (s *MagicTokenService) CreateMagicToken(ttl time.Duration, note string) (*CreatedMagicToken, error) {
 	if ttl <= 0 {
 		ttl = magicTokenDefaultTTL
 	}
@@ -43,9 +66,10 @@ func (s *MagicTokenService) CreateMagicToken(ttl time.Duration, note string) (*m
 	if ttl > magicTokenMaxTTL {
 		ttl = magicTokenMaxTTL
 	}
+	plain := random.Seq(magicTokenLength)
 	now := time.Now()
 	t := &model.MagicToken{
-		Token:     random.Seq(magicTokenLength),
+		Token:     hashMagicToken(plain),
 		CreatedAt: now.Unix(),
 		ExpiresAt: now.Add(ttl).Unix(),
 		Note:      note,
@@ -54,7 +78,7 @@ func (s *MagicTokenService) CreateMagicToken(ttl time.Duration, note string) (*m
 	if err := db.Create(t).Error; err != nil {
 		return nil, err
 	}
-	return t, nil
+	return &CreatedMagicToken{Row: t, Plaintext: plain}, nil
 }
 
 // ConsumeMagicToken validates and atomically marks the token as
@@ -63,13 +87,17 @@ func (s *MagicTokenService) CreateMagicToken(ttl time.Duration, note string) (*m
 // never existed" via the response. The internal expiry path still
 // marks the row consumed so a reuse attempt won't reveal the prior
 // state via a different code path.
-func (s *MagicTokenService) ConsumeMagicToken(token string) error {
-	if token == "" {
+//
+// `plain` is the URL-side plaintext token. We hash it before lookup so
+// the DB never sees the plaintext.
+func (s *MagicTokenService) ConsumeMagicToken(plain string) error {
+	if plain == "" {
 		return ErrMagicTokenInvalid
 	}
+	hashed := hashMagicToken(plain)
 	db := database.GetDB()
 	var t model.MagicToken
-	err := db.Where("token = ?", token).First(&t).Error
+	err := db.Where("token = ?", hashed).First(&t).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return ErrMagicTokenInvalid
 	}
