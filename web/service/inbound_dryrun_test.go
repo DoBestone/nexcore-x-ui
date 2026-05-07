@@ -263,6 +263,49 @@ func TestProtocolSingleton_SS2022(t *testing.T) {
 	}
 }
 
+// TestProtocolSingleton_DifferentOutboundsAllowed pins the v2.0.15 relaxation:
+// 同协议 + 不同 OutboundTag 放行,因为按区域中转拆桶是常见架构(一台 vmess 直连
+// 本机出口、一台走 us-relay、一台走 jp-relay)。三条监听不同端口、走不同出口,
+// 互不冲突。同 OutboundTag 仍然冲突 — 两条相同 (protocol, outbound) = 自己跟
+// 自己抢出口,除了误操作没有合理用途。
+func TestProtocolSingleton_DifferentOutboundsAllowed(t *testing.T) {
+	setUpDB(t)
+	withFakeXray(t, "/usr/bin/true")
+	svc := InboundService{}
+
+	first := sampleVless(11020)
+	first.OutboundTag = "" // 直连
+	if err := svc.AddInbound(first); err != nil {
+		t.Fatalf("setup first: %v", err)
+	}
+
+	second := sampleVless(11021)
+	second.OutboundTag = "us-relay"
+	if err := svc.AddInbound(second); err != nil {
+		t.Fatalf("second VLESS with different outbound should be allowed, got: %v", err)
+	}
+
+	third := sampleVless(11022)
+	third.OutboundTag = "jp-relay"
+	if err := svc.AddInbound(third); err != nil {
+		t.Fatalf("third VLESS with another outbound should be allowed, got: %v", err)
+	}
+
+	// 同 OutboundTag 还是不让加 — bucket "us-relay" 已经有第二条了
+	dup := sampleVless(11023)
+	dup.OutboundTag = "us-relay"
+	if err := svc.AddInbound(dup); !errors.Is(err, ErrProtocolSingleton) {
+		t.Fatalf("expected ErrProtocolSingleton on duplicate (vless, us-relay), got: %v", err)
+	}
+
+	// 直连那条已经存在,再加直连同样冲突
+	dupDirect := sampleVless(11024)
+	dupDirect.OutboundTag = ""
+	if err := svc.AddInbound(dupDirect); !errors.Is(err, ErrProtocolSingleton) {
+		t.Fatalf("expected ErrProtocolSingleton on duplicate (vless, direct), got: %v", err)
+	}
+}
+
 // TestIsMultiUserProtocol covers the protocol-classification logic directly,
 // independent of any DB state.
 func TestIsMultiUserProtocol(t *testing.T) {

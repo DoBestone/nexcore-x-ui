@@ -124,6 +124,13 @@ func (a *InboundController) updateInbound(c *gin.Context) {
 	err = a.inboundService.UpdateInbound(inbound)
 	jsonMsg(c, "修改", err)
 	if err == nil {
-		a.xrayService.SetToNeedRestart()
+		// 同步 RestartXray:用户从 UI 启停 / 改入站,期望"点完立刻生效",
+		// 之前只走 SetToNeedRestart + 10s cron,体感"关了还能用"。dryRun
+		// 在 UpdateInbound 里已经验过新 config 合法,这里 RestartXray 失败
+		// 概率极低;万一失败,SetToNeedRestart 兜底让 cron 兜下一拍。
+		if rerr := a.xrayService.RestartXray(false); rerr != nil {
+			logger.Warning("入站修改后 xray 重启失败,留给 cron 兜底:", rerr)
+			a.xrayService.SetToNeedRestart()
+		}
 	}
 }

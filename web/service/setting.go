@@ -118,6 +118,11 @@ var defaultValueMap = map[string]string{
 	"onlineWebhookUrl":    "",
 	"onlineWebhookSecret": "",
 	"onlineWebhookNodeId": "",
+	// 节点名称(e.g. "香港节点1")。share link 的 ps/remarks 字段以
+	// "[<nodeName>] <email>" 的形式注入,客户端导入订阅时一眼能看出
+	// 这一条来自哪个节点。被某个出站绑定的入站会改用出站名称作为前缀,
+	// 见 ShareService 链接生成。
+	"nodeName": "",
 }
 
 type SettingService struct {
@@ -316,6 +321,17 @@ func (s *SettingService) setInt(key string, value int) error {
 
 func (s *SettingService) GetXrayConfigTemplate() (string, error) {
 	return s.getString("xrayTemplateConfig")
+}
+
+// GetNodeName 返回面板配置的节点名称(e.g. "香港节点1")。空字符串表示
+// 用户没设过 — share link 的 ps 字段就退回到 email/remark,跟旧行为一致。
+// 失败时也返回空,share link 流程不应被一次 settings 读取失败拖垮。
+func (s *SettingService) GetNodeName() string {
+	v, err := s.getString("nodeName")
+	if err != nil {
+		return ""
+	}
+	return v
 }
 
 func (s *SettingService) GetListen() (string, error) {

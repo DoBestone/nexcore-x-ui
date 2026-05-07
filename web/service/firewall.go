@@ -30,13 +30,21 @@ import (
 // FirewallStatus 给前端的扁平数据。
 //
 // Active=true 仅当我们识别到一个启用中的防火墙;Tool 标识是哪个工具,
-// 让前端文案能写得具体("UFW 当前阻挡 10000/tcp")。OpenPorts 是当前
-// 系统层放行的入向 TCP 端口列表(不区分 IPv4 / IPv6 — 任一面放行就算
-// 通,前端不用做交集)。
+// 让前端文案能写得具体("UFW 当前阻挡 10000/tcp")。OpenPorts 是单端口
+// 放行,OpenRanges 是端口段放行(UFW `10000:11000/tcp` / firewalld
+// `10000-11000/tcp` 都常见)。前端判定 inbound 是否被防火墙挡住时:
+// 端口在 OpenPorts ∪ 任一 OpenRanges 范围内即视为通。不区分 IPv4 / IPv6
+// — 任一面放行就算通。
+type PortRange struct {
+	Lo int `json:"lo"`
+	Hi int `json:"hi"`
+}
+
 type FirewallStatus struct {
-	Active    bool   `json:"active"`
-	Tool      string `json:"tool"`
-	OpenPorts []int  `json:"openPorts"`
+	Active     bool        `json:"active"`
+	Tool       string      `json:"tool"`
+	OpenPorts  []int       `json:"openPorts"`
+	OpenRanges []PortRange `json:"openRanges"`
 }
 
 // FirewallService 是 stateful 单例:status 探测要 fork 子进程,30s 缓存
@@ -87,10 +95,12 @@ func detectFirewall() FirewallStatus {
 //
 //	10001/tcp                  ALLOW       Anywhere
 //	10001/tcp (v6)             ALLOW       Anywhere (v6)
+//	10000:11000/tcp            ALLOW       Anywhere
 //
-// 端口范围(`6881:6889/tcp`)没纳入 — panel inbound 是单端口,误判损失
-// 小;真要支持留给后续。
-var ufwAllowLine = regexp.MustCompile(`^(\d+)/tcp(?:\s*\(v6\))?\s+ALLOW\b`)
+// 第一组捕获端口或端口段(`\d+(?::\d+)?` —— 单端口或 `lo:hi`);拿到后
+// 再按是否有冒号拆。早先只识单端口,用户用 `ufw allow 10000:11000/tcp`
+// 一锅端时面板把段内 inbound 仍报"被防火墙挡",误报 → 用户疑惑。
+var ufwAllowLine = regexp.MustCompile(`^(\d+(?::\d+)?)/tcp(?:\s*\(v6\))?\s+ALLOW\b`)
 
 func readUFW(path string) (FirewallStatus, bool) {
 	out, err := exec.Command(path, "status").CombinedOutput()
@@ -105,6 +115,7 @@ func readUFW(path string) (FirewallStatus, bool) {
 	}
 	st := FirewallStatus{Active: true, Tool: "ufw"}
 	seen := map[int]struct{}{}
+	seenRange := map[PortRange]struct{}{}
 	scanner := bufio.NewScanner(strings.NewReader(text))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -112,17 +123,38 @@ func readUFW(path string) (FirewallStatus, bool) {
 		if len(m) != 2 {
 			continue
 		}
-		p, err := strconv.Atoi(m[1])
-		if err != nil {
-			continue
-		}
-		if _, dup := seen[p]; dup {
-			continue
-		}
-		seen[p] = struct{}{}
-		st.OpenPorts = append(st.OpenPorts, p)
+		addPortOrRange(m[1], ":", &st, seen, seenRange)
 	}
 	return st, true
+}
+
+// addPortOrRange 解析一个 token —— 单端口("10001")或端口段("10000:11000"
+// for UFW / "10000-11000" for firewalld) —— 推进 status。sep 是当前
+// 工具的范围分隔符。lo > hi 或越界的段静默跳过。
+func addPortOrRange(tok, sep string, st *FirewallStatus, seen map[int]struct{}, seenRange map[PortRange]struct{}) {
+	if i := strings.Index(tok, sep); i >= 0 {
+		lo, err1 := strconv.Atoi(tok[:i])
+		hi, err2 := strconv.Atoi(tok[i+1:])
+		if err1 != nil || err2 != nil || lo <= 0 || hi <= 0 || lo > hi {
+			return
+		}
+		r := PortRange{Lo: lo, Hi: hi}
+		if _, dup := seenRange[r]; dup {
+			return
+		}
+		seenRange[r] = struct{}{}
+		st.OpenRanges = append(st.OpenRanges, r)
+		return
+	}
+	p, err := strconv.Atoi(tok)
+	if err != nil || p <= 0 {
+		return
+	}
+	if _, dup := seen[p]; dup {
+		return
+	}
+	seen[p] = struct{}{}
+	st.OpenPorts = append(st.OpenPorts, p)
 }
 
 func readFirewalld(path string) (FirewallStatus, bool) {
@@ -138,9 +170,11 @@ func readFirewalld(path string) (FirewallStatus, bool) {
 		return st, true
 	}
 	seen := map[int]struct{}{}
+	seenRange := map[PortRange]struct{}{}
 	for _, tok := range strings.Fields(string(out)) {
-		// tok 形如 "10001/tcp"。同时支持 "10001/tcp,udp" 这种 firewalld
-		// 写法 — 拆出协议段做后缀匹配,只要包含 tcp 就算放行。
+		// tok 形如 "10001/tcp" 或 "10000-11000/tcp"。同时支持
+		// "10001/tcp,udp" 这种 firewalld 写法 — 拆出协议段做后缀匹配,
+		// 只要包含 tcp 就算放行。
 		parts := strings.SplitN(tok, "/", 2)
 		if len(parts) != 2 {
 			continue
@@ -148,15 +182,7 @@ func readFirewalld(path string) (FirewallStatus, bool) {
 		if !strings.Contains(parts[1], "tcp") {
 			continue
 		}
-		p, err := strconv.Atoi(parts[0])
-		if err != nil {
-			continue
-		}
-		if _, dup := seen[p]; dup {
-			continue
-		}
-		seen[p] = struct{}{}
-		st.OpenPorts = append(st.OpenPorts, p)
+		addPortOrRange(parts[0], "-", &st, seen, seenRange)
 	}
 	return st, true
 }

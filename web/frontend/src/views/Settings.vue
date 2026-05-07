@@ -132,6 +132,16 @@ onMounted(() => {
               <el-form-item label="时区">
                 <el-input v-model="all.timeLocation" />
               </el-form-item>
+              <el-form-item label="节点名称">
+                <el-input
+                  v-model="all.nodeName"
+                  placeholder="如:香港节点1 (留空 = 分享链接不加前缀)"
+                />
+                <span class="nx-muted" style="font-size: 12px">
+                  会以 <code>[节点名称] email</code> 注入到 vmess/vless/trojan/ss
+                  分享链接的 ps 字段;入站绑了出站时改用该出站的名称作为前缀。
+                </span>
+              </el-form-item>
               <el-form-item>
                 <el-button type="primary" :loading="saving" @click="save">保存</el-button>
                 <el-button type="danger" plain @click="restart">重启面板</el-button>

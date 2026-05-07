@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"nexcore-x-ui/database/model"
 	"nexcore-x-ui/logger"
 	"nexcore-x-ui/util/json_util"
 	"nexcore-x-ui/xray"
@@ -20,6 +21,7 @@ type XrayService struct {
 	inboundService   InboundService
 	settingService   SettingService
 	blockRuleService BlockRuleService
+	outboundService  OutboundService
 }
 
 func (s *XrayService) IsXrayRunning() bool {
@@ -70,11 +72,42 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// per-client enable=false 的客户从 inbound.settings.clients[] 里剥掉,
+	// 否则 xray 看不到 disabled 标志(那个标志只活在 client_traffics 表里),
+	// 用户在 modal 关 toggle / 业务系统 PATCH limits 之后,实际 xray 还在
+	// 接受这个 client 的连接 — 历史 bug,v2.0.x 几个版本一直没修。空集合
+	// fast-path 跑 0 次过滤,常见情况零成本。
+	disabled, derr := (&ClientTrafficService{}).DisabledEmails()
+	if derr != nil {
+		// DB 失败时退化为不过滤(保守:宁可 disabled 漏拦,也不要因为
+		// 这点失败把整 xray 启动卡死)。
+		logger.Warning("加载 disabled client 列表失败,跳过过滤:", derr)
+		disabled = map[string]struct{}{}
+	}
+	if len(disabled) > 0 {
+		emails := make([]string, 0, len(disabled))
+		for e := range disabled {
+			emails = append(emails, e)
+		}
+		logger.Info("xray reload: 将剥离 disabled clients ", emails)
+	}
 	for _, inbound := range inbounds {
 		if !inbound.Enable {
 			continue
 		}
-		inboundConfig := inbound.GenXrayInboundConfig()
+		filtered := *inbound
+		if len(disabled) > 0 {
+			filtered.Settings = stripDisabledClientsFromSettings(inbound.Settings, disabled)
+		}
+		// 多用户协议在所有 client 都被 disable 时 settings.clients[] 变空,
+		// xray 启动会拒绝(vmess/vless 至少要 1 个 user)。这种情况整条
+		// inbound 跳过 — 等价于"所有用户被踢 → 入站临时下线",符合操作员
+		// 的语义预期(也避免 xray 启动失败把整个面板的 xray 拖死)。
+		if isMultiUserProtocol(&filtered) && hasNoActiveClients(filtered.Settings) {
+			logger.Info("xray reload: inbound id=", filtered.Id, " 所有 clients 被 disable,临时跳过")
+			continue
+		}
+		inboundConfig := filtered.GenXrayInboundConfig()
 		xrayConfig.InboundConfigs = append(xrayConfig.InboundConfigs, *inboundConfig)
 	}
 
@@ -103,7 +136,142 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		logger.Warning("注入屏蔽规则失败，跳过:", err)
 	}
 
+	// 注入用户配置的出站服务器 + 入站→出站路由。出站对象 append 到模板
+	// outbounds 数组(放后面,template 自带的 freedom 仍是默认 fallback);
+	// 路由规则 prepend 到 routing.rules,保证 inboundTag 命中后立即定向到
+	// 用户出站,不会被模板里"非中国 IP → 直连"这种 catch-all 规则吞掉。
+	if err := injectUserOutbounds(xrayConfig, &s.outboundService, inbounds); err != nil {
+		logger.Warning("注入用户出站失败,跳过:", err)
+	}
+
 	return xrayConfig, nil
+}
+
+// hasNoActiveClients 判断多用户协议的 settings.clients[] 是否已为空。
+// 调用方先做了 isMultiUserProtocol 判断,这里只看 clients 数组长度;
+// 解析失败按"非空"处理(不轻易把 inbound 跳过)。
+func hasNoActiveClients(settings string) bool {
+	if settings == "" {
+		return true
+	}
+	var probe struct {
+		Clients []map[string]interface{} `json:"clients"`
+	}
+	if err := json.Unmarshal([]byte(settings), &probe); err != nil {
+		return false
+	}
+	return len(probe.Clients) == 0
+}
+
+// stripDisabledClientsFromSettings 解析 inbound.Settings,把 clients[] 里
+// email 命中 disabled 集合的条目剥掉,返回新的 settings JSON 字符串。
+//
+//   - VLESS / VMess / Trojan / SS-2022 multi-user 都把客户列表存在
+//     `clients` 数组里(每条至少有 email 字段),走同一过滤路径
+//   - SS-legacy / Socks / HTTP / Dokodemo 不在 clients[] 模型里 → JSON 里
+//     根本没 clients 数组,过滤跑空,原样返回
+//   - 解析失败 / 字段类型异常 → 静默退回原 settings,避免 1 个坏数据全栈卡死
+//
+// settings 里其它字段(decryption / fallbacks / disableInsecureEncryption /
+// SS-2022 顶层 method+password)原样保留。
+func stripDisabledClientsFromSettings(settings string, disabled map[string]struct{}) string {
+	if settings == "" || len(disabled) == 0 {
+		return settings
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
+		return settings
+	}
+	rawClients, ok := parsed["clients"].([]interface{})
+	if !ok || len(rawClients) == 0 {
+		return settings
+	}
+	kept := make([]interface{}, 0, len(rawClients))
+	stripped := false
+	for _, c := range rawClients {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			kept = append(kept, c)
+			continue
+		}
+		email, _ := m["email"].(string)
+		if email != "" {
+			if _, dis := disabled[email]; dis {
+				stripped = true
+				continue
+			}
+		}
+		kept = append(kept, m)
+	}
+	if !stripped {
+		return settings
+	}
+	parsed["clients"] = kept
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return settings
+	}
+	return string(out)
+}
+
+// injectUserOutbounds — 把 OutboundService.GenXrayOutboundConfigs() 生成的
+// 出站对象 append 到 xrayConfig.OutboundConfigs (raw JSON);把
+// GenXrayRoutingRulesForInbounds() 生成的路由规则 prepend 到
+// xrayConfig.RouterConfig.rules。两个数组都是 RawMessage,需要 unmarshal
+// → 改 → marshal。失败保留原 config 不动。
+func injectUserOutbounds(
+	cfg *xray.Config,
+	svc *OutboundService,
+	inbounds []*model.Inbound,
+) error {
+	userOutbounds, err := svc.GenXrayOutboundConfigs()
+	if err != nil {
+		return err
+	}
+	rules := svc.GenXrayRoutingRulesForInbounds(inbounds)
+	if len(userOutbounds) == 0 && len(rules) == 0 {
+		return nil
+	}
+
+	if len(userOutbounds) > 0 {
+		var existing []interface{}
+		if len(cfg.OutboundConfigs) > 0 {
+			if err := json.Unmarshal(cfg.OutboundConfigs, &existing); err != nil {
+				return err
+			}
+		}
+		merged := existing
+		for _, ob := range userOutbounds {
+			merged = append(merged, ob)
+		}
+		out, err := json.Marshal(merged)
+		if err != nil {
+			return err
+		}
+		cfg.OutboundConfigs = json_util.RawMessage(out)
+	}
+
+	if len(rules) > 0 {
+		router := map[string]interface{}{}
+		if len(cfg.RouterConfig) > 0 {
+			if err := json.Unmarshal(cfg.RouterConfig, &router); err != nil {
+				return err
+			}
+		}
+		existing, _ := router["rules"].([]interface{})
+		merged := make([]interface{}, 0, len(rules)+len(existing))
+		for _, r := range rules {
+			merged = append(merged, r)
+		}
+		merged = append(merged, existing...)
+		router["rules"] = merged
+		out, err := json.Marshal(router)
+		if err != nil {
+			return err
+		}
+		cfg.RouterConfig = json_util.RawMessage(out)
+	}
+	return nil
 }
 
 // injectBlockRules 把 BlockRuleService 生成的规则插入到 xrayConfig.RouterConfig

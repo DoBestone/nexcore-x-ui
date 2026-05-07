@@ -29,6 +29,10 @@ export interface DBInbound {
   streamSettings: string
   tag: string
   sniffing: string
+  // 关联到 Outbound.tag。空字符串 = 直连(走模板的 freedom);非空 = 把
+  // 该入站的流量定向到指定出站做中转。share link 的 ps 字段用对应
+  // Outbound.name 替代节点名作前缀,见后端 ShareService.remarkPrefix。
+  outboundTag?: string
   clientStats?: ClientTraffic[]
 }
 
@@ -69,6 +73,24 @@ export interface AllSetting {
   onlineWebhookUrl: string
   onlineWebhookSecret: string
   onlineWebhookNodeId: string
+  // 节点名称(e.g. "香港节点1") — 注入到 share link 的 ps 字段方便
+  // 客户端识别。空 = 不加前缀。
+  nodeName: string
+}
+
+// 出站服务器 — 用户配置的中转节点。Inbound 通过 outboundTag 字段关联。
+export interface Outbound {
+  id: number
+  tag: string
+  name: string
+  protocol: string
+  address: string
+  port: number
+  settings: string
+  streamSettings: string
+  remark: string
+  enable: boolean
+  createdAt: number
 }
 
 // API token row (web/controller/api_panel.go listTokens)

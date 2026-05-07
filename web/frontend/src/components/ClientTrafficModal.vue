@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UserFilled, Refresh, ArrowDown } from '@element-plus/icons-vue'
 import { http, post, del } from '@/api/http'
@@ -15,8 +15,36 @@ const loading = ref(false)
 const rows = ref<ClientTraffic[]>([])
 const onlineByEmail = ref<Record<string, string[]>>({})
 const linksByEmail = ref<Record<string, string>>({})
+// 实时同步的入站 settings:每次 reload() 后回拉一次 inbound,以便孤儿
+// 检测准确(props.inbound.settings 是父级 list 取的快照,modal 期间内
+// 入站可能被另一处改动)。失败 fallback 用 props.inbound.settings。
+const liveSettings = ref<string>(props.inbound.settings || '')
 let onlineTimer: number | null = null
 let dataChanged = false
+
+// 解析当前 settings.clients[].email 集合,用来识别"孤儿"客户端 —
+// 即 client_traffics 表里有行,但 settings.clients[] 已经不再列它。
+// 历史 bug:InboundForm 编辑入站把 clients[] 截到 1 条,留下一堆
+// modal 看得到却 QR 不出 / 删不掉的孤儿。后端 DeleteClient 现在能
+// 清孤儿,前端这里把它们标出来,告诉用户为什么 QR 没了。
+const settingsEmails = computed<Set<string>>(() => {
+  try {
+    const s = JSON.parse(liveSettings.value || '{}') as { clients?: unknown[] }
+    if (!Array.isArray(s.clients)) return new Set()
+    const out = new Set<string>()
+    for (const c of s.clients) {
+      const email = (c as { email?: unknown })?.email
+      if (typeof email === 'string' && email !== '') out.add(email)
+    }
+    return out
+  } catch {
+    return new Set()
+  }
+})
+
+function isOrphan(email: string): boolean {
+  return !settingsEmails.value.has(email)
+}
 
 async function reload() {
   loading.value = true
@@ -28,7 +56,21 @@ async function reload() {
   } finally {
     loading.value = false
   }
-  await Promise.all([refreshOnline(), refreshLinks()])
+  await Promise.all([refreshOnline(), refreshLinks(), refreshLiveSettings()])
+}
+
+async function refreshLiveSettings() {
+  try {
+    const r = await http.get<{
+      success: boolean
+      obj?: { settings?: string }
+    }>(`xui/api/inbounds/${props.inbound.id}/info`)
+    if (typeof r.data?.obj?.settings === 'string') {
+      liveSettings.value = r.data.obj.settings
+    }
+  } catch {
+    /* ignore — fallback 已经是 props.inbound.settings */
+  }
 }
 
 async function refreshOnline() {
@@ -88,11 +130,39 @@ function randomPassword(len = 16): string {
   return out
 }
 
+// SS-2022(method 以 2022-blake3- 开头)的 user PSK 必须是 base64 编码、
+// 长度跟 method 匹配:aes-128-gcm 16 字节 → 24 字符 base64;aes-256-gcm
+// 32 字节 → 44 字符 base64。早前 newPassword 走 randomPassword(16) 给的是
+// 16 位 ASCII,xray reload 报 "proxy/shadowsocks_2022: bad key"。
+function ss2022Method(): string | null {
+  if (props.inbound.protocol !== 'shadowsocks') return null
+  try {
+    const s = JSON.parse(props.inbound.settings || '{}') as { method?: string }
+    if (typeof s.method === 'string' && s.method.startsWith('2022-blake3-')) {
+      return s.method
+    }
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
+function genClientPassword(): string {
+  const m = ss2022Method()
+  if (m) {
+    const bytesNeeded = m.includes('256') ? 32 : 16
+    const arr = new Uint8Array(bytesNeeded)
+    crypto.getRandomValues(arr)
+    return btoa(String.fromCharCode(...arr))
+  }
+  return randomPassword(16)
+}
+
 function openAdd() {
   newEmail.value = `user-${Date.now().toString().slice(-6)}`
   newId.value = uuidV4()
   newFlow.value = 'xtls-rprx-vision'
-  newPassword.value = randomPassword(16)
+  newPassword.value = genClientPassword()
   newTotalGB.value = 0
   newExpiry.value = null
   newEnable.value = true
@@ -279,9 +349,37 @@ onBeforeUnmount(() => {
       </span>
     </div>
 
+    <!-- 孤儿提示:有任何一行 client_traffics 不在 settings.clients[] 里,
+         给一条非 closable 的 alert,解释发生了什么 + 建议怎么处理。 -->
+    <el-alert
+      v-if="rows.some((r) => isOrphan(r.email))"
+      type="warning"
+      :closable="false"
+      show-icon
+      title="检测到孤儿客户端"
+      style="margin-bottom: 12px"
+    >
+      <template #default>
+        下方标记 <el-tag type="warning" size="small">孤儿</el-tag>
+        的行已经不在 xray 配置里(连不上、不算流量、二维码也无法生成),
+        但流量记录还留着。可以直接「删除」清掉,或在「添加客户端」里用同样的
+        email 重建以恢复服务。
+      </template>
+    </el-alert>
+
     <el-empty v-if="rows.length === 0" description="该入站还没有 email 客户端" />
     <el-table v-else :data="rows" stripe v-loading="loading">
-      <el-table-column prop="email" label="email" min-width="160" />
+      <el-table-column prop="email" label="email" min-width="160">
+        <template #default="{ row }">
+          <span>{{ row.email }}</span>
+          <el-tag
+            v-if="isOrphan(row.email)"
+            type="warning"
+            size="small"
+            style="margin-left: 6px"
+          >孤儿</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="已用 / 上限" min-width="180">
         <template #default="{ row }">
           <span class="nx-mono">{{ sizeFormat(row.up + row.down) }}</span>
@@ -304,7 +402,11 @@ onBeforeUnmount(() => {
       </el-table-column>
       <el-table-column label="启用" width="80">
         <template #default="{ row }">
-          <el-switch :model-value="row.enable" @change="(v: boolean) => toggleEnable(row, v)" />
+          <el-switch
+            :model-value="row.enable"
+            :disabled="isOrphan(row.email)"
+            @change="(v: boolean) => toggleEnable(row, v)"
+          />
         </template>
       </el-table-column>
       <el-table-column label="在线 IP" width="110">
@@ -321,8 +423,22 @@ onBeforeUnmount(() => {
       </el-table-column>
       <el-table-column label="操作" width="240" align="right">
         <template #default="{ row }">
-          <el-button size="small" @click="showQrcode(row)">二维码</el-button>
-          <el-button size="small" @click="openEdit(row)">编辑</el-button>
+          <!-- 孤儿行禁用「二维码」「编辑」(都依赖 settings.clients[] 里的
+               配置:UUID/密码 / 限额对一个不存在的 client 没意义);删除走
+               孤儿清理路径,后端会安全地只删 client_traffics 行。 -->
+          <el-tooltip
+            v-if="isOrphan(row.email)"
+            effect="light"
+            content="该客户已不在 xray 配置中,无法生成二维码。可直接删除孤儿行。"
+          >
+            <el-button size="small" disabled>二维码</el-button>
+          </el-tooltip>
+          <el-button v-else size="small" @click="showQrcode(row)">二维码</el-button>
+          <el-button
+            size="small"
+            :disabled="isOrphan(row.email)"
+            @click="openEdit(row)"
+          >编辑</el-button>
           <el-dropdown trigger="click" @command="(cmd: string) => {
             if (cmd === 'reset') resetTraffic(row)
             else if (cmd === 'del') delClient(row)
@@ -330,7 +446,10 @@ onBeforeUnmount(() => {
             <el-button size="small">更多 <el-icon><ArrowDown /></el-icon></el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="reset">重置流量</el-dropdown-item>
+                <el-dropdown-item
+                  command="reset"
+                  :disabled="isOrphan(row.email)"
+                >重置流量</el-dropdown-item>
                 <el-dropdown-item command="del" divided>
                   <span style="color: var(--nx-danger)">删除</span>
                 </el-dropdown-item>
@@ -366,9 +485,12 @@ onBeforeUnmount(() => {
           <el-form-item label="密码">
             <el-input v-model="newPassword">
               <template #append>
-                <el-button @click="newPassword = randomPassword(16)">生成</el-button>
+                <el-button @click="newPassword = genClientPassword()">生成</el-button>
               </template>
             </el-input>
+            <span v-if="ss2022Method()" class="nx-muted" style="font-size: 12px">
+              SS-2022 user PSK 须为 base64,长度与 method 匹配(自动生成已处理)
+            </span>
           </el-form-item>
         </template>
         <el-divider content-position="left">额度(可选)</el-divider>

@@ -64,11 +64,16 @@ func validateListenAddress(listen string) error {
 }
 
 // ErrProtocolSingleton is returned when an operator tries to add a second
-// inbound for a protocol that supports multi-user via settings.clients[]
-// (vless / vmess / trojan / shadowsocks-2022). Those protocols are designed
-// to share one port across many users; allowing two separate inbounds is
-// always a mistake — they'd just compete for the same port. The right move
-// is to edit the existing inbound and add a client there.
+// inbound that targets the same (protocol, outbound) pair. Multi-user
+// protocols (vless / vmess / trojan / shadowsocks-2022) share one port
+// across many users via settings.clients[];两条相同 (protocol+出站)
+// 的入站等于自己跟自己抢一个出口,纯粹是误操作 — 应该编辑现有入站再
+// 加 client。
+//
+// 但**不同出站**的同协议入站要放行:实际场景是 "一台 vmess 入站直连本机
+// 出口,另一台 vmess 入站走 us-relay 出站,再来一台走 jp-relay" — 三条
+// 监听不同端口、走不同出口,业务系统据此把客户分桶到不同区域中转。
+// 唯一性键从 protocol 改成 (protocol, outboundTag)。
 var ErrProtocolSingleton = errors.New("protocol_singleton")
 
 type InboundService struct {
@@ -92,7 +97,12 @@ func isMultiUserProtocol(in *model.Inbound) bool {
 	return false
 }
 
-// checkProtocolSingleton enforces "one inbound per multi-user protocol".
+// checkProtocolSingleton enforces "one inbound per (protocol, outbound)
+// pair" for multi-user protocols. 同协议 + 同出站 视作冲突;同协议 + 不同
+// 出站 放行(用户主动按区域拆桶的常见架构)。直连用空字符串作 key 跟
+// 任何出站区分开,所以"两条 vmess 都直连"仍然冲突,但"一条 vmess 直连 +
+// 一条 vmess 走 us-relay" 完全合法。
+//
 // ignoreId > 0 means "we're updating that inbound, don't count it against
 // itself". Returns ErrProtocolSingleton on conflict.
 func (s *InboundService) checkProtocolSingleton(in *model.Inbound, ignoreId int) error {
@@ -110,10 +120,18 @@ func (s *InboundService) checkProtocolSingleton(in *model.Inbound, ignoreId int)
 		return err
 	}
 	for _, r := range rows {
-		if isMultiUserProtocol(r) {
-			return fmt.Errorf("%w: protocol %s already has inbound id=%d, edit that one and add a client instead",
-				ErrProtocolSingleton, in.Protocol, r.Id)
+		if !isMultiUserProtocol(r) {
+			continue
 		}
+		if r.OutboundTag != in.OutboundTag {
+			continue
+		}
+		bucket := in.OutboundTag
+		if bucket == "" {
+			bucket = "直连"
+		}
+		return fmt.Errorf("%w: protocol %s 已有同出站(%s)的入站 id=%d,改用编辑+添加客户端,或换一个出站",
+			ErrProtocolSingleton, in.Protocol, bucket, r.Id)
 	}
 	return nil
 }

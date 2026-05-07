@@ -3,12 +3,14 @@ package controller
 import (
 	"embed"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"nexcore-x-ui/logger"
 	"nexcore-x-ui/web/service"
 	"nexcore-x-ui/web/session"
 )
@@ -63,6 +65,7 @@ func (a *APIPanelController) initRouter(g *gin.RouterGroup) {
 	g.GET("/inbounds/:id/client-traffics", a.listClientTraffics)
 	g.POST("/clients/:email/reset-traffic", a.resetClientTraffic)
 	g.POST("/clients/:email/limits", a.patchClientLimits)  // 浏览器走全局 form-urlencoded
+	g.POST("/clients/:email/enable", a.setClientEnable)    // 启停切换专用,镜像 /api/v1/clients/:email/enable
 
 	// v1.1.x:面板侧 client CRUD,给客户端流量 modal 用。镜像
 	// /api/v1/inbounds/:id/clients/* 但 session-auth,前端不需要 token。
@@ -77,6 +80,16 @@ func (a *APIPanelController) initRouter(g *gin.RouterGroup) {
 	// 端口列表。前端用这个跟 inbound 端口做差集,提示"端口被防火墙拦
 	// 了,客户端连不进来"。只读探测,不动用户配置;详见 firewall.go。
 	g.GET("/firewall-status", a.firewallStatus)
+
+	// xray 进程操作:面板 dashboard 用。/api/v1/xray/restart 已经存在
+	// 但需要 token,这里给浏览器走 session-auth 的镜像。stop 在 v1 没暴露
+	// (调试场景多),也补一条;logs 单独 GET 让前端弹层展示最近 stdout/stderr,
+	// 不再让用户对着 systemctl 排错。config 把当前生效的 xray JSON 拉回来,
+	// 配合「修改后未生效」这种诊断场景。
+	g.POST("/xray/restart", a.xrayRestart)
+	g.POST("/xray/stop", a.xrayStop)
+	g.GET("/xray/logs", a.xrayLogs)
+	g.GET("/xray/config", a.xrayEffectiveConfig)
 }
 
 // me — SPA 启动时打,用来判断当前 session 是否登录。未登录走 401(由
@@ -237,12 +250,51 @@ func (a *APIPanelController) patchClientLimits(c *gin.Context) {
 		jsonMsg(c, "更新", err)
 		return
 	}
+	enableStr := "<unset>"
+	if body.Enable != nil {
+		enableStr = fmt.Sprintf("%v", *body.Enable)
+	}
+	logger.Info(fmt.Sprintf("patchClientLimits email=%q enable=%s", email, enableStr))
 	if err := a.clientTrafficService.SetLimits(email, body); err != nil {
 		jsonMsg(c, "更新", err)
 		return
 	}
-	a.xrayService.SetToNeedRestart()
+	applyImmediately(&a.xrayService)
 	jsonMsg(c, "更新", nil)
+}
+
+// setClientEnable — 客户端启停的专用轻量端点,前端开关组件直接调,不需要
+// 拼 SetLimitsParams 形状。body 只看一个 enable 字段;ShouldBind 自动按
+// Content-Type 选 JSON / form,浏览器侧两种写法都能用。
+func (a *APIPanelController) setClientEnable(c *gin.Context) {
+	email := c.Param("email")
+	var body struct {
+		Enable bool `json:"enable" form:"enable"`
+	}
+	if err := c.ShouldBind(&body); err != nil {
+		jsonMsg(c, "切换启用", err)
+		return
+	}
+	enable := body.Enable
+	if err := a.clientTrafficService.SetLimits(email, service.SetLimitsParams{Enable: &enable}); err != nil {
+		jsonMsg(c, "切换启用", err)
+		return
+	}
+	applyImmediately(&a.xrayService)
+	jsonObj(c, gin.H{"email": email, "enable": enable}, nil)
+}
+
+// applyImmediately:用户主动 toggle / 编辑 client 时,立即触发一次 xray
+// reload,不等 10s cron。RestartXray(false) 内置 config-equality 短路,
+// 多个并发 toggle 会在 lock 上排队,代价小。失败兜底用 SetToNeedRestart
+// 让下一拍 cron 兜过来。
+func applyImmediately(xs *service.XrayService) {
+	if err := xs.RestartXray(false); err != nil {
+		logger.Warning("立即重启 xray 失败,留给 cron 兜底:", err)
+		xs.SetToNeedRestart()
+		return
+	}
+	logger.Info("xray 已重启 (per-client 改动后立即生效)")
 }
 
 // ---------- inbound client CRUD (v1.1.2 panel-side) ----------
@@ -355,6 +407,55 @@ func (a *APIPanelController) inboundLinks(c *gin.Context) {
 // 跨节点 API 用户场景下意义不大。
 func (a *APIPanelController) firewallStatus(c *gin.Context) {
 	jsonObj(c, a.firewallService.Status(), nil)
+}
+
+// ---------- xray ops ----------
+
+// xrayRestart force-restarts the xray subprocess. Equivalent to
+// /api/v1/xray/restart but session-auth so the dashboard can call it
+// without provisioning a token. Force=true (vs config-equality short-circuit
+// in cron-driven restarts) — the user clicked the button precisely because
+// they want xray to actually bounce.
+func (a *APIPanelController) xrayRestart(c *gin.Context) {
+	if err := a.xrayService.RestartXray(true); err != nil {
+		jsonMsg(c, "重启 xray", err)
+		return
+	}
+	jsonObj(c, gin.H{"restarted": true}, nil)
+}
+
+// xrayStop terminates the xray subprocess without restarting. The cron
+// in InboundController doesn't auto-restart unless inbound config changes,
+// so xray will stay stopped until the user hits "重启" — that's the
+// intended way to "pause" a node from the panel.
+func (a *APIPanelController) xrayStop(c *gin.Context) {
+	if err := a.xrayService.StopXray(); err != nil {
+		jsonMsg(c, "停止 xray", err)
+		return
+	}
+	jsonObj(c, gin.H{"stopped": true}, nil)
+}
+
+// xrayLogs returns the xray subprocess' recent stdout/stderr buffer
+// (last ~100 lines, in-memory, cleared on each restart). Used by the
+// dashboard's 日志 dialog so users don't need shell access for the
+// common "why won't xray start" diagnosis.
+func (a *APIPanelController) xrayLogs(c *gin.Context) {
+	jsonObj(c, gin.H{"logs": a.xrayService.GetRecentLogs()}, nil)
+}
+
+// xrayEffectiveConfig returns the JSON that would be (or was last) handed
+// to xray. Helps diagnose "I edited an inbound but the change isn't
+// visible" — the panel-side state vs xray's actual loaded config diverge
+// when xray is stopped or last restart errored before reload.
+func (a *APIPanelController) xrayEffectiveConfig(c *gin.Context) {
+	cfg, err := a.xrayService.GetEffectiveConfig()
+	if err != nil {
+		jsonObj(c, nil, err)
+		return
+	}
+	c.Header("Content-Type", "application/json; charset=utf-8")
+	c.String(http.StatusOK, cfg)
 }
 
 // ---------- docs ----------

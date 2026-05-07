@@ -44,6 +44,10 @@ type AllSetting struct {
 	OnlineWebhookUrl    string `json:"onlineWebhookUrl" form:"onlineWebhookUrl"`
 	OnlineWebhookSecret string `json:"onlineWebhookSecret" form:"onlineWebhookSecret"`
 	OnlineWebhookNodeId string `json:"onlineWebhookNodeId" form:"onlineWebhookNodeId"`
+
+	// 节点名称(e.g. "香港节点1") — 注入到 share link 的 ps/remarks 字段,
+	// 客户端导入订阅时一眼能看出这一条出自哪个节点。空 = 不加前缀(旧行为)。
+	NodeName string `json:"nodeName" form:"nodeName"`
 }
 
 func (s *AllSetting) CheckValid() error {

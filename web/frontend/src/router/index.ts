@@ -36,6 +36,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '入站列表', icon: 'Connection' }
       },
       {
+        path: 'outbounds',
+        name: 'outbounds',
+        component: () => import('@/views/Outbounds.vue'),
+        meta: { title: '出站配置', icon: 'Promotion' }
+      },
+      {
         path: 'block-rules',
         name: 'block-rules',
         component: () => import('@/views/BlockRules.vue'),

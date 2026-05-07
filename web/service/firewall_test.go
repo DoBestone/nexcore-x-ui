@@ -25,8 +25,9 @@ func TestUFWAllowLineMatchesIPv4AndIPv6(t *testing.T) {
 		// 不匹配:UDP-only 行(只放 TCP 进列表 — 翻墙协议入站基本都跑 TCP,
 		// UDP 走 SS-2022 / hysteria 等场景后续再加)
 		{"53/udp                     ALLOW       Anywhere", ""},
-		// 不匹配:端口范围(目前不支持,留给后续)
-		{"6881:6889/tcp              ALLOW       Anywhere", ""},
+		// 端口范围(`lo:hi/tcp`)v2.0.16 起支持,捕获整段
+		{"6881:6889/tcp              ALLOW       Anywhere", "6881:6889"},
+		{"10000:11000/tcp (v6)       ALLOW       Anywhere (v6)", "10000:11000"},
 		// 不匹配:其它 noise
 		{"Status: active", ""},
 		{"To                         Action      From", ""},
@@ -40,6 +41,63 @@ func TestUFWAllowLineMatchesIPv4AndIPv6(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("ufwAllowLine(%q) → %q, want %q", tc.line, got, tc.want)
 		}
+	}
+}
+
+// addPortOrRange:解析层公共 helper 测试。两个工具 sep 不同(UFW ":" /
+// firewalld "-"),但语义一样。关注点:端口段进 OpenRanges,单端口进
+// OpenPorts;非法值(lo>hi、空、负)静默跳过不污染输出;重复的 token 去重。
+func TestAddPortOrRange(t *testing.T) {
+	type wantState struct {
+		ports  []int
+		ranges []PortRange
+	}
+	cases := []struct {
+		name string
+		sep  string
+		toks []string
+		want wantState
+	}{
+		{
+			name: "ufw mix single + range",
+			sep:  ":",
+			toks: []string{"443", "10001", "10000:11000", "443" /*dup*/, "10000:11000" /*dup*/},
+			want: wantState{
+				ports:  []int{443, 10001},
+				ranges: []PortRange{{Lo: 10000, Hi: 11000}},
+			},
+		},
+		{
+			name: "firewalld dash range",
+			sep:  "-",
+			toks: []string{"22", "10000-10999"},
+			want: wantState{
+				ports:  []int{22},
+				ranges: []PortRange{{Lo: 10000, Hi: 10999}},
+			},
+		},
+		{
+			name: "garbage tokens skipped",
+			sep:  ":",
+			toks: []string{"abc", "0:100", "100:50" /*lo>hi*/, "200:abc"},
+			want: wantState{ports: nil, ranges: nil},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &FirewallStatus{Active: true}
+			seen := map[int]struct{}{}
+			seenR := map[PortRange]struct{}{}
+			for _, tok := range tc.toks {
+				addPortOrRange(tok, tc.sep, st, seen, seenR)
+			}
+			if !reflect.DeepEqual(st.OpenPorts, tc.want.ports) {
+				t.Errorf("OpenPorts = %v, want %v", st.OpenPorts, tc.want.ports)
+			}
+			if !reflect.DeepEqual(st.OpenRanges, tc.want.ranges) {
+				t.Errorf("OpenRanges = %v, want %v", st.OpenRanges, tc.want.ranges)
+			}
+		})
 	}
 }
 

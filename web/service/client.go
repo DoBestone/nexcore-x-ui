@@ -174,7 +174,18 @@ func (s *ClientService) DeleteClient(inboundID int, identifier string) (*model.I
 		}
 		out = append(out, c)
 	}
+	cts := &ClientTrafficService{}
 	if !found {
+		// Orphan recovery: client_traffics 行还在但 settings.clients[] 里
+		// 已经没这个 identifier。历史 InboundForm 编辑入站时一度把 clients[]
+		// 截到 1 条,留下一堆孤儿行 — modal 看得到却既不能 QR 也不能删,
+		// 用户陷死。这里查一下孤儿:存在 → 仅清 client_traffics,settings
+		// 不变所以不需要 xray 重启;不存在 → 真的找不到,返 NotFound。
+		if existing, gerr := cts.GetByEmail(identifier); gerr == nil &&
+			existing != nil && existing.InboundId == inboundID {
+			_ = cts.DeleteByEmail(identifier)
+			return in, nil
+		}
 		return nil, ErrClientNotFound
 	}
 	if err := writeClients(in, settings, out); err != nil {
@@ -186,7 +197,7 @@ func (s *ClientService) DeleteClient(inboundID int, identifier string) (*model.I
 	// v1.1.0:client_traffics 行也清理掉。identifier 可能是 email
 	// (vless/vmess/trojan/ss-2022 这几个走 email 路径),也可能是别
 	// 的字段;不管怎样安全删 — DeleteByEmail 不存在就 no-op。
-	_ = (&ClientTrafficService{}).DeleteByEmail(identifier)
+	_ = cts.DeleteByEmail(identifier)
 	s.xrayService.SetToNeedRestart()
 	return in, nil
 }

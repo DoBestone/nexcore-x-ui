@@ -2,23 +2,55 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Delete, User, Connection, ArrowDown } from '@element-plus/icons-vue'
-import { http, post, postForm } from '@/api/http'
-import type { DBInbound } from '@/api/types'
+import { http, postForm } from '@/api/http'
+import type { DBInbound, Outbound } from '@/api/types'
 import { sizeFormat, fmtTimeMs, isExpired, isMultiUserProtocol, clientCount } from '@/utils/format'
 import InboundForm from '@/components/InboundForm.vue'
 import ClientTrafficModal from '@/components/ClientTrafficModal.vue'
-import QrcodeDialog from '@/components/QrcodeDialog.vue'
+import InboundDetailsDialog from '@/components/InboundDetailsDialog.vue'
 
 const inbounds = ref<DBInbound[]>([])
 const loading = ref(false)
 const onlineIps = ref<Record<string, string[]>>({})
 let onlineTimer: number | null = null
 
+// 出站名称查表 — 入站列表 "出站" 列展示用。后端 Inbound.outboundTag 是 tag,
+// 不是名字;为了 UI 上"美国中转-2"这种可读标签,reload 时拉一次出站列表
+// 建一个 tag→name 的 map。出站删除会自动解绑入站(后端逻辑),所以这里
+// 不会出现 tag 找不到对应 outbound 的边界情况。
+const outboundsByTag = ref<Record<string, Outbound>>({})
+
+async function loadOutbounds() {
+  try {
+    const list = (await postForm<Outbound[]>('xui/outbound/list')) || []
+    const m: Record<string, Outbound> = {}
+    for (const o of list) m[o.tag] = o
+    outboundsByTag.value = m
+  } catch {
+    outboundsByTag.value = {}
+  }
+}
+
+function outboundLabel(tag: string): string {
+  const ob = outboundsByTag.value[tag]
+  return ob ? ob.name : tag
+}
+
 // 防火墙状态(/xui/api/firewall-status):后端检测到 UFW / firewalld
-// 启用时,把已放行的 TCP 端口列表带回来。前端跟 inbound.port 做差集,
-// 提示"端口被防火墙拦了,客户端连不进来" —— 历史上反复有用户拿了
-// 链接连不上,排了半天发现是 UFW INPUT DROP 没放行。
-type FirewallStatus = { active: boolean; tool: string; openPorts: number[] }
+// 启用时,把已放行的 TCP 端口列表 + 端口段带回来。前端跟 inbound.port
+// 做差集,提示"端口被防火墙拦了,客户端连不进来" —— 历史上反复有用户
+// 拿了链接连不上,排了半天发现是 UFW INPUT DROP 没放行。
+//
+// 端口段(UFW `10000:11000/tcp` / firewalld `10000-11000/tcp`)是 v2.0.16
+// 之后才识别的:用户用 `ufw allow 10000:11000/tcp` 一次性放行一段,如果
+// 前端只看单端口列表会把段内 inbound 全报"被拦住",误报多到失去信号。
+type PortRange = { lo: number; hi: number }
+type FirewallStatus = {
+  active: boolean
+  tool: string
+  openPorts: number[]
+  openRanges: PortRange[]
+}
 const firewall = ref<FirewallStatus | null>(null)
 
 async function refreshFirewall() {
@@ -33,14 +65,24 @@ async function refreshFirewall() {
 }
 
 // 当前 inbound 列表里被防火墙挡住的端口。多端口去重并排序,banner
-// 文案直接 join 成 "10000, 10002" 这种顺眼的串。
+// 文案直接 join 成 "10000, 10002" 这种顺眼的串。端口段也算放行 —
+// 单端口或落在任一段 [lo, hi] 内即视为通。
+function isOpen(port: number, fw: FirewallStatus): boolean {
+  if (fw.openPorts && fw.openPorts.indexOf(port) >= 0) return true
+  if (fw.openRanges) {
+    for (const r of fw.openRanges) {
+      if (port >= r.lo && port <= r.hi) return true
+    }
+  }
+  return false
+}
+
 const blockedPorts = computed<number[]>(() => {
   const fw = firewall.value
   if (!fw || !fw.active) return []
-  const open = new Set(fw.openPorts)
   const used = new Set<number>()
   for (const x of inbounds.value) {
-    if (typeof x.port === "number" && !open.has(x.port)) used.add(x.port)
+    if (typeof x.port === 'number' && !isOpen(x.port, fw)) used.add(x.port)
   }
   return [...used].sort((a, b) => a - b)
 })
@@ -172,38 +214,6 @@ async function resetTraffic(row: DBInbound) {
   await reload()
 }
 
-// ---------- 二维码 ----------
-const qrVisible = ref(false)
-const qrTitle = ref('')
-const qrLink = ref('')
-
-async function showQrcode(row: DBInbound) {
-  // 单用户协议:用 inbound 级链接(取第一条 client / 唯一 password)
-  // 多用户协议:用 client modal 行内二维码,这里按入站协议判断
-  if (!['vmess', 'vless', 'trojan', 'shadowsocks'].includes(row.protocol)) {
-    ElMessage.info('该协议不支持分享链接')
-    return
-  }
-  try {
-    const links = await http
-      .get<{ success: boolean; obj?: Record<string, string> }>(
-        `xui/api/inbounds/${row.id}/links`
-      )
-      .then((r) => r.data?.obj || {})
-    const first = Object.values(links)[0]
-    if (!first) {
-      // SS-legacy 不会有 email,fallback 到 v1 接口需 host;这里直接告知
-      ElMessage.info('该入站没有可生成的链接(可能缺少 email/客户)')
-      return
-    }
-    qrTitle.value = row.remark || `inbound#${row.id}`
-    qrLink.value = first
-    qrVisible.value = true
-  } catch (e) {
-    ElMessage.error('获取链接失败')
-  }
-}
-
 // ---------- 客户端流量 modal ----------
 const ctVisible = ref(false)
 const ctInbound = ref<DBInbound | null>(null)
@@ -213,12 +223,25 @@ function openClientTraffic(row: DBInbound) {
   ctVisible.value = true
 }
 
+// ---------- 单用户详情 modal ----------
+// 单用户协议(SS-legacy / Socks / HTTP / Dokodemo)没法走 ClientTrafficModal,
+// 也不走多用户的行内二维码;之前 SS-legacy 的"二维码"按钮还因为后端
+// LinksByEmail 对无 email 入站返空 map 而点了报错。这里给所有单用户入站
+// 一个统一的"连接信息"入口。
+const detailsVisible = ref(false)
+const detailsInbound = ref<DBInbound | null>(null)
+
+function openDetails(row: DBInbound) {
+  detailsInbound.value = row
+  detailsVisible.value = true
+}
+
 // ---------- lifecycle ----------
 onMounted(async () => {
   await reload()
   // 防火墙状态后端 30s cache,前端跟着 inbound list 一起拉一次足够;
   // 用户保存新 inbound 之后在 reload() 里再拉一次,见 onClose() 钩子。
-  await Promise.all([refreshOnlineIps(), refreshFirewall()])
+  await Promise.all([refreshOnlineIps(), refreshFirewall(), loadOutbounds()])
   onlineTimer = window.setInterval(() => {
     if (!document.hidden) refreshOnlineIps()
   }, 5000)
@@ -313,9 +336,17 @@ onBeforeUnmount(() => {
             <el-tag type="info">{{ clientCount(row.settings) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="总流量" width="200">
+        <el-table-column label="总流量" width="160">
           <template #default="{ row }">
             <span class="nx-mono">{{ sizeFormat(row.up + row.down) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="出站" width="120">
+          <template #default="{ row }">
+            <el-tag v-if="row.outboundTag" type="warning" size="small">
+              {{ outboundLabel(row.outboundTag) }}
+            </el-tag>
+            <el-tag v-else type="success" size="small">直连</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="备注" prop="remark" />
@@ -380,6 +411,14 @@ onBeforeUnmount(() => {
             <el-tag v-else type="success">永久</el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="出站" width="120">
+          <template #default="{ row }">
+            <el-tag v-if="row.outboundTag" type="warning" size="small">
+              {{ outboundLabel(row.outboundTag) }}
+            </el-tag>
+            <el-tag v-else type="success" size="small">直连</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="在线 IP" width="110">
           <template #default="{ row }">
             <el-tooltip
@@ -395,9 +434,7 @@ onBeforeUnmount(() => {
         <el-table-column label="备注" prop="remark" />
         <el-table-column label="操作" width="220" align="right">
           <template #default="{ row }">
-            <el-button size="small" @click="showQrcode(row)" v-if="['vmess','vless','trojan','shadowsocks'].includes(row.protocol)">
-              二维码
-            </el-button>
+            <el-button size="small" type="primary" @click="openDetails(row)">详情</el-button>
             <el-dropdown trigger="click" @command="(cmd: string) => {
               if (cmd === 'edit') openEdit(row)
               else if (cmd === 'reset') resetTraffic(row)
@@ -419,6 +456,8 @@ onBeforeUnmount(() => {
       </el-table>
     </el-card>
 
+    <InboundDetailsDialog v-model="detailsVisible" :inbound="detailsInbound" />
+
     <InboundForm
       v-if="formVisible"
       :mode="formMode"
@@ -433,8 +472,6 @@ onBeforeUnmount(() => {
       :inbound="ctInbound"
       @close="(reloaded) => { ctVisible = false; if (reloaded) reload() }"
     />
-
-    <QrcodeDialog v-model="qrVisible" :title="qrTitle" :link="qrLink" />
   </div>
 </template>
 

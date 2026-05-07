@@ -46,6 +46,26 @@ func (s *ClientTrafficService) GetByEmail(email string) (*model.ClientTraffic, e
 	return &ct, nil
 }
 
+// DisabledEmails 返回 client_traffics.enable=false 的所有 email 集合。
+// XrayService.GetXrayConfig 用它从 inbound.settings.clients[] 里剥掉
+// disabled 客户。空集合是合法的(没人被禁),caller 不需要做 nil 判断。
+func (s *ClientTrafficService) DisabledEmails() (map[string]struct{}, error) {
+	var rows []model.ClientTraffic
+	if err := database.GetDB().
+		Select("email").
+		Where("enable = ?", false).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]struct{}, len(rows))
+	for _, r := range rows {
+		if r.Email != "" {
+			out[r.Email] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
 // ListByInbound — 入站详情页客户端列表用。返回该 inbound 下所有 client 的
 // 流量行,顺序按 email 排序便于稳定渲染。
 func (s *ClientTrafficService) ListByInbound(inboundID int) ([]model.ClientTraffic, error) {

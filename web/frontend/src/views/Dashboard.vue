@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { post } from '@/api/http'
+import { http, post } from '@/api/http'
 import type { ServerStatus } from '@/api/types'
 import { sizeFormat, uptimeFormat } from '@/utils/format'
 
@@ -9,6 +9,7 @@ const status = ref<ServerStatus | null>(null)
 const versions = ref<string[]>([])
 const installing = ref(false)
 const restartLoading = ref(false)
+const stopLoading = ref(false)
 let timer: number | null = null
 
 async function refresh() {
@@ -49,16 +50,144 @@ async function installXray(version: string) {
 }
 
 async function restartXray() {
+  // 强制重启 — 后端 RestartXray(true) 跳过 config-equality 短路。这是
+  // 用户主动按按钮的语义:出问题想"再起一次试试",哪怕 config 没变。
+  // 失败回显后端 msg(常见:xray 二进制 preflight 拒绝 / config 校验不过)。
+  try {
+    await ElMessageBox.confirm('确认重启 xray?现有连接会被断开。', '重启 xray', {
+      type: 'warning',
+      confirmButtonText: '重启',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
   restartLoading.value = true
   try {
-    // 没有专门 restart 路由,改一个全局设置 PUT 触发 needRestart 不合适;
-    // 用 setting/restartPanel 走的是面板重启,xray 由后端 cron 跟踪
-    // needRestart 自动重启。这里直接刷状态即可。
+    await post('xui/api/xray/restart')
+    ElMessage.success('xray 已重启')
     await refresh()
-    ElMessage.info('xray 状态已刷新(变更配置后 ~10s 内生效)')
+  } catch (e: unknown) {
+    const msg =
+      (e as { response?: { data?: { msg?: string } } })?.response?.data?.msg || '重启失败'
+    ElMessage.error(msg)
   } finally {
     restartLoading.value = false
   }
+}
+
+async function stopXray() {
+  // 停止后 xray 不会自动起来,除非用户改 inbound config(触发 needRestart
+  // cron)或手动按"重启"。所以用 error 级二次确认 — 用户应当清楚"停了之后
+  // 整台节点不通"这个语义。
+  try {
+    await ElMessageBox.confirm(
+      '停止 xray 之后,所有客户端立即断流。除非你按"重启"或修改入站配置触发自动重启,xray 不会自己起来。',
+      '停止 xray',
+      { type: 'error', confirmButtonText: '停止', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  stopLoading.value = true
+  try {
+    await post('xui/api/xray/stop')
+    ElMessage.success('xray 已停止')
+    await refresh()
+  } catch (e: unknown) {
+    const msg =
+      (e as { response?: { data?: { msg?: string } } })?.response?.data?.msg || '停止失败'
+    ElMessage.error(msg)
+  } finally {
+    stopLoading.value = false
+  }
+}
+
+// ---------- 日志弹层 ----------
+const logsVisible = ref(false)
+const logsLoading = ref(false)
+const logsText = ref('')
+
+async function showLogs() {
+  logsVisible.value = true
+  logsLoading.value = true
+  try {
+    const r = await http.get<{ success: boolean; obj?: { logs: string } }>(
+      'xui/api/xray/logs'
+    )
+    logsText.value = r.data?.obj?.logs || '(无日志输出)'
+  } catch {
+    logsText.value = '(获取日志失败)'
+  } finally {
+    logsLoading.value = false
+  }
+}
+
+async function copyLogs() {
+  try {
+    if (window.isSecureContext && navigator.clipboard) {
+      await navigator.clipboard.writeText(logsText.value)
+      ElMessage.success('已复制')
+      return
+    }
+  } catch {
+    /* fallthrough */
+  }
+  // http 上下文 fallback
+  const ta = document.createElement('textarea')
+  ta.value = logsText.value
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  const ok = document.execCommand('copy')
+  document.body.removeChild(ta)
+  ElMessage[ok ? 'success' : 'warning'](ok ? '已复制' : '复制失败')
+}
+
+// ---------- 配置弹层 ----------
+const configVisible = ref(false)
+const configLoading = ref(false)
+const configText = ref('')
+
+async function showConfig() {
+  configVisible.value = true
+  configLoading.value = true
+  try {
+    // /xui/api/xray/config 直接返回 JSON 字符串(非 jsonObj 包装),
+    // 用 http.get 拿原文,Content-Type 是 application/json 但 axios
+    // 会自动 parse — 这里强制 transformResponse 拿原始字符串,
+    // 否则 textarea 显示 [object Object]。
+    const r = await http.get<string>('xui/api/xray/config', {
+      transformResponse: [(data: unknown) => data as string]
+    })
+    configText.value = typeof r.data === 'string' ? r.data : JSON.stringify(r.data, null, 2)
+  } catch {
+    configText.value = '(获取配置失败)'
+  } finally {
+    configLoading.value = false
+  }
+}
+
+async function copyConfig() {
+  try {
+    if (window.isSecureContext && navigator.clipboard) {
+      await navigator.clipboard.writeText(configText.value)
+      ElMessage.success('已复制')
+      return
+    }
+  } catch {
+    /* fallthrough */
+  }
+  const ta = document.createElement('textarea')
+  ta.value = configText.value
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  const ok = document.execCommand('copy')
+  document.body.removeChild(ta)
+  ElMessage[ok ? 'success' : 'warning'](ok ? '已复制' : '复制失败')
 }
 
 onMounted(async () => {
@@ -170,10 +299,29 @@ onBeforeUnmount(() => {
             {{ status?.xray.state || '-' }}
           </el-tag>
           <span class="nx-mono">{{ status?.xray.version || '-' }}</span>
-          <el-button size="small" @click="restartXray" :loading="restartLoading">刷新</el-button>
         </div>
         <div v-if="status?.xray.errorMsg" class="xray-err">
           {{ status.xray.errorMsg }}
+        </div>
+        <div class="xray-actions">
+          <el-button
+            type="primary"
+            size="small"
+            :loading="restartLoading"
+            :disabled="stopLoading"
+            @click="restartXray"
+          >重启 xray</el-button>
+          <el-button
+            type="danger"
+            size="small"
+            plain
+            :loading="stopLoading"
+            :disabled="restartLoading || status?.xray.state !== 'running'"
+            @click="stopXray"
+          >停止</el-button>
+          <el-button size="small" @click="showLogs">查看日志</el-button>
+          <el-button size="small" @click="showConfig">查看配置</el-button>
+          <el-button size="small" @click="refresh">刷新状态</el-button>
         </div>
         <div class="versions" v-if="versions.length">
           <div class="muted">可用版本:</div>
@@ -191,6 +339,59 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <!-- xray 日志弹层 -->
+    <el-dialog
+      v-model="logsVisible"
+      title="xray 日志"
+      width="720px"
+      class="constrained-dialog"
+      :align-center="true"
+    >
+      <div v-loading="logsLoading">
+        <el-input
+          v-model="logsText"
+          type="textarea"
+          :rows="18"
+          readonly
+          class="nx-mono-textarea"
+        />
+        <div class="dialog-foot-hint">
+          <span class="muted">最近 ~100 行 stdout/stderr,重启后会清空</span>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="showLogs" :loading="logsLoading">刷新</el-button>
+        <el-button type="primary" @click="copyLogs">复制</el-button>
+        <el-button @click="logsVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- xray 生效配置弹层 -->
+    <el-dialog
+      v-model="configVisible"
+      title="xray 当前配置"
+      width="720px"
+      class="constrained-dialog"
+      :align-center="true"
+    >
+      <div v-loading="configLoading">
+        <el-input
+          v-model="configText"
+          type="textarea"
+          :rows="18"
+          readonly
+          class="nx-mono-textarea"
+        />
+        <div class="dialog-foot-hint">
+          <span class="muted">面板根据当前模板 + 入站列表渲染出的 JSON;实际 xray 是否已加载这份配置取决于最近一次重启</span>
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="copyConfig">复制</el-button>
+        <el-button @click="configVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -272,5 +473,22 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+.xray-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.dialog-foot-hint {
+  margin-top: 8px;
+  font-size: 12px;
+}
+:deep(.nx-mono-textarea .el-textarea__inner) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
 }
 </style>

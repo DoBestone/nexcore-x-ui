@@ -5,6 +5,7 @@ import { ElMessageBox } from 'element-plus'
 import {
   Odometer,
   Connection,
+  Promotion,
   Lock,
   Document,
   Setting,
@@ -47,6 +48,7 @@ onMounted(async () => {
 const nav: NavItem[] = [
   { path: '/dashboard', title: '系统状态', icon: Odometer },
   { path: '/inbounds', title: '入站列表', icon: Connection },
+  { path: '/outbounds', title: '出站配置', icon: Promotion },
   { path: '/block-rules', title: '屏蔽规则', icon: Lock },
   { path: '/api-console', title: 'API 控制台', icon: Document },
   { path: '/settings', title: '面板设置', icon: Setting }

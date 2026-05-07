@@ -102,6 +102,7 @@ func (a *V1Controller) register(g *gin.RouterGroup) {
 	ro.GET("/traffic", a.dbTraffic)
 	ro.GET("/traffic/live", a.liveTraffic)
 	ro.GET("/online-ips", a.listOnlineIps)
+	ro.GET("/online-ips-by-email", a.listOnlineIpsByEmail)
 	ro.GET("/online-ips/:tag", a.listOnlineIpsByTag)
 	ro.GET("/block-rules", a.listBlockRules)
 	ro.GET("/block-rules/presets", a.listBlockRulePresets)
@@ -147,6 +148,7 @@ func (a *V1Controller) register(g *gin.RouterGroup) {
 	api.GET("/clients/:email/traffic", a.getClientTraffic)
 	api.POST("/clients/:email/reset-traffic", a.resetClientTraffic)
 	api.PATCH("/clients/:email/limits", a.patchClientLimits)
+	api.PATCH("/clients/:email/enable", a.setClientEnable) // 对称 PATCH /inbounds/:id/enable
 	api.POST("/clients/disable-expired", a.disableExpiredClients)
 
 	api.POST("/certs", a.uploadCert)
@@ -401,6 +403,14 @@ func (a *V1Controller) listOnlineIpsByTag(c *gin.Context) {
 		return
 	}
 	OK(c, service.GetOnlineIPService().GetIPs(tag))
+}
+
+// listOnlineIpsByEmail 返回 email → 当前活跃 IP 列表的映射。底层是 access.log
+// 60s 滑窗,与 /online-ips/:tag 共用同一份内存状态。业务系统拼"某入站下哪个
+// client 在线、来自哪些 IP"时不必再 join /online-ips/:tag + clients[],直接
+// 查这条即可。
+func (a *V1Controller) listOnlineIpsByEmail(c *gin.Context) {
+	OK(c, service.GetOnlineIPService().GetIPsByEmail())
 }
 
 // ---------- block rules ----------
@@ -955,6 +965,33 @@ func (a *V1Controller) patchClientLimits(c *gin.Context) {
 	a.xrayService.SetToNeedRestart()
 	row, _ := a.clientTrafficService.GetByEmail(email)
 	OK(c, row)
+}
+
+// setClientEnable — 业务侧最高频的 client 操作就是"暂停 / 恢复",所以单独
+// 给一条对称路由(参照 PATCH /inbounds/:id/enable),避免用户每次借道
+// /limits 端点 — 后者要求知道 SetLimitsParams 形状,且语义上"改配额"和
+// "纯启停"是两件事。后端实现仍然复用 SetLimits(只填 Enable 指针),不引
+// 入新 service 方法。
+func (a *V1Controller) setClientEnable(c *gin.Context) {
+	email := c.Param("email")
+	var body struct {
+		Enable bool `json:"enable"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		BadRequest(c, "invalid_body", err.Error())
+		return
+	}
+	enable := body.Enable
+	if err := a.clientTrafficService.SetLimits(email, service.SetLimitsParams{Enable: &enable}); err != nil {
+		if errors.Is(err, service.ErrClientTrafficNotFound) {
+			NotFound(c, "client_traffic_not_found", err.Error())
+			return
+		}
+		Internal(c, "update_failed", err)
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	OK(c, gin.H{"email": email, "enable": enable})
 }
 
 // disableExpiredClients —— 业务系统月初对账 / 定时任务后调,扫描所有

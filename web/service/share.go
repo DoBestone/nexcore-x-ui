@@ -66,8 +66,33 @@ func ValidateShareHostSyntactic(host string) (string, string) {
 // (vmess://, vless://, trojan://, ss://). The server address used in the
 // link must be supplied by the caller — the panel cannot reliably guess it.
 type ShareService struct {
-	inboundService InboundService
-	clientService  ClientService
+	inboundService  InboundService
+	clientService   ClientService
+	settingService  SettingService
+	outboundService OutboundService
+}
+
+// remarkPrefix 计算一条入站的 share link 前缀("[<name>] ")。
+//   - 如果 inbound.OutboundTag 非空 → 用对应 Outbound.Name(中转出站名)
+//   - 否则用面板的节点名称(SettingService.GetNodeName)
+//   - 都为空就返回 "" (旧行为,不加前缀)
+//
+// 客户端导入订阅时一眼能看出"这一条来自哪个节点 / 中转哪个出口"。
+// 失败时静默回退到 "",link 生成不应被一次 settings/db 读取拖垮。
+func (s *ShareService) remarkPrefix(in *model.Inbound) string {
+	if in != nil && in.OutboundTag != "" {
+		if ob, err := s.outboundService.GetByTag(in.OutboundTag); err == nil && ob != nil {
+			name := strings.TrimSpace(ob.Name)
+			if name != "" {
+				return "[" + name + "] "
+			}
+		}
+	}
+	name := strings.TrimSpace(s.settingService.GetNodeName())
+	if name == "" {
+		return ""
+	}
+	return "[" + name + "] "
 }
 
 // LinksForInbound returns one link per client inside the inbound, plus a
@@ -96,23 +121,24 @@ func (s *ShareService) linksForLoadedInbound(in *model.Inbound, host string) ([]
 		_ = json.Unmarshal([]byte(in.StreamSettings), &stream)
 	}
 
+	prefix := s.remarkPrefix(in)
 	out := make([]string, 0, len(clients))
 	switch in.Protocol {
 	case model.VMess:
 		for _, c := range clients {
-			if link := buildVMessLink(in, host, c, stream); link != "" {
+			if link := buildVMessLink(in, host, c, stream, prefix); link != "" {
 				out = append(out, link)
 			}
 		}
 	case model.VLESS:
 		for _, c := range clients {
-			if link := buildVLESSLink(in, host, c, stream); link != "" {
+			if link := buildVLESSLink(in, host, c, stream, prefix); link != "" {
 				out = append(out, link)
 			}
 		}
 	case model.Trojan:
 		for _, c := range clients {
-			if link := buildTrojanLink(in, host, c, stream); link != "" {
+			if link := buildTrojanLink(in, host, c, stream, prefix); link != "" {
 				out = append(out, link)
 			}
 		}
@@ -136,10 +162,10 @@ func (s *ShareService) linksForLoadedInbound(in *model.Inbound, host string) ([]
 				if email == "" || userPSK == "" {
 					continue
 				}
-				out = append(out, buildSS2022UserLink(in, host, method, serverPSK, userPSK, email))
+				out = append(out, buildSS2022UserLink(in, host, method, serverPSK, userPSK, email, prefix))
 			}
 		case method != "" && serverPSK != "":
-			out = append(out, buildSSLink(in, host, method, serverPSK))
+			out = append(out, buildSSLink(in, host, method, serverPSK, prefix))
 		}
 	default:
 		return nil, ErrUnsupportedProtocol
@@ -177,6 +203,7 @@ func (s *ShareService) linksByEmailFromLoadedInbound(in *model.Inbound, host str
 	if in.Protocol == model.Shadowsocks && in.Settings != "" {
 		_ = json.Unmarshal([]byte(in.Settings), &ssSettings)
 	}
+	prefix := s.remarkPrefix(in)
 	out := make(map[string]string, len(clients))
 	for _, c := range clients {
 		email, _ := c["email"].(string)
@@ -186,11 +213,11 @@ func (s *ShareService) linksByEmailFromLoadedInbound(in *model.Inbound, host str
 		var link string
 		switch in.Protocol {
 		case model.VMess:
-			link = buildVMessLink(in, host, c, stream)
+			link = buildVMessLink(in, host, c, stream, prefix)
 		case model.VLESS:
-			link = buildVLESSLink(in, host, c, stream)
+			link = buildVLESSLink(in, host, c, stream, prefix)
 		case model.Trojan:
-			link = buildTrojanLink(in, host, c, stream)
+			link = buildTrojanLink(in, host, c, stream, prefix)
 		case model.Shadowsocks:
 			// Only SS-2022 multi-user has per-email clients with their own
 			// passwords. Legacy SS doesn't carry clients[]/email at all,
@@ -204,7 +231,7 @@ func (s *ShareService) linksByEmailFromLoadedInbound(in *model.Inbound, host str
 			if userPSK == "" {
 				break
 			}
-			link = buildSS2022UserLink(in, host, method, serverPSK, userPSK, email)
+			link = buildSS2022UserLink(in, host, method, serverPSK, userPSK, email, prefix)
 		}
 		if link != "" {
 			out[email] = link
@@ -252,12 +279,12 @@ func (s *ShareService) SubscriptionForAll(host string) (string, error) {
 
 // ---------- per-protocol builders ----------
 
-func buildVMessLink(in *model.Inbound, host string, c map[string]any, stream map[string]any) string {
+func buildVMessLink(in *model.Inbound, host string, c map[string]any, stream map[string]any, prefix string) string {
 	id, _ := c["id"].(string)
 	if id == "" {
 		return ""
 	}
-	remark := vmessRemark(in, c)
+	remark := prefix + vmessRemark(in, c)
 	obj := map[string]any{
 		"v":    "2",
 		"ps":   remark,
@@ -279,7 +306,7 @@ func buildVMessLink(in *model.Inbound, host string, c map[string]any, stream map
 	return "vmess://" + base64.StdEncoding.EncodeToString(raw)
 }
 
-func buildVLESSLink(in *model.Inbound, host string, c map[string]any, stream map[string]any) string {
+func buildVLESSLink(in *model.Inbound, host string, c map[string]any, stream map[string]any, prefix string) string {
 	id, _ := c["id"].(string)
 	if id == "" {
 		return ""
@@ -293,11 +320,11 @@ func buildVLESSLink(in *model.Inbound, host string, c map[string]any, stream map
 		q.Set("security", security)
 	}
 	mergeStreamQuery(stream, q)
-	remark := url.PathEscape(strDefault(c["email"], in.Remark))
+	remark := url.PathEscape(prefix + strDefault(c["email"], in.Remark))
 	return fmt.Sprintf("vless://%s@%s:%d?%s#%s", id, host, in.Port, q.Encode(), remark)
 }
 
-func buildTrojanLink(in *model.Inbound, host string, c map[string]any, stream map[string]any) string {
+func buildTrojanLink(in *model.Inbound, host string, c map[string]any, stream map[string]any, prefix string) string {
 	password, _ := c["password"].(string)
 	if password == "" {
 		return ""
@@ -308,14 +335,14 @@ func buildTrojanLink(in *model.Inbound, host string, c map[string]any, stream ma
 		q.Set("security", security)
 	}
 	mergeStreamQuery(stream, q)
-	remark := url.PathEscape(strDefault(c["email"], in.Remark))
+	remark := url.PathEscape(prefix + strDefault(c["email"], in.Remark))
 	return fmt.Sprintf("trojan://%s@%s:%d?%s#%s",
 		url.QueryEscape(password), host, in.Port, q.Encode(), remark)
 }
 
-func buildSSLink(in *model.Inbound, host string, method, password string) string {
+func buildSSLink(in *model.Inbound, host string, method, password string, prefix string) string {
 	userInfo := base64.URLEncoding.EncodeToString([]byte(method + ":" + password))
-	remark := url.PathEscape(in.Remark)
+	remark := url.PathEscape(prefix + in.Remark)
 	return fmt.Sprintf("ss://%s@%s:%d#%s", userInfo, host, in.Port, remark)
 }
 
@@ -326,9 +353,9 @@ func buildSSLink(in *model.Inbound, host string, method, password string) string
 // 这是与 buildSSLink 的关键区别:legacy / 单用户 SS 只有 method:password
 // 两段;多用户协议必须把服务端 psk 和用户 psk 都带上,客户端才能 derive
 // 出正确的会话密钥。
-func buildSS2022UserLink(in *model.Inbound, host string, method, serverPSK, userPSK, email string) string {
+func buildSS2022UserLink(in *model.Inbound, host string, method, serverPSK, userPSK, email, prefix string) string {
 	userInfo := base64.URLEncoding.EncodeToString([]byte(method + ":" + serverPSK + ":" + userPSK))
-	return fmt.Sprintf("ss://%s@%s:%d#%s", userInfo, host, in.Port, url.PathEscape(email))
+	return fmt.Sprintf("ss://%s@%s:%d#%s", userInfo, host, in.Port, url.PathEscape(prefix+email))
 }
 
 // ---------- helpers ----------

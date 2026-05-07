@@ -15,6 +15,7 @@ type XUIController struct {
 	settingController   *SettingController
 	apiPanelController  *APIPanelController
 	blockRuleController *BlockRuleController
+	outboundController  *OutboundController
 }
 
 func NewXUIController(g *gin.RouterGroup) *XUIController {
@@ -31,4 +32,5 @@ func (a *XUIController) initRouter(g *gin.RouterGroup) {
 	a.settingController = NewSettingController(g)
 	a.apiPanelController = NewAPIPanelController(g)
 	a.blockRuleController = NewBlockRuleController(g)
+	a.outboundController = NewOutboundController(g)
 }

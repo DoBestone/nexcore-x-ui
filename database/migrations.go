@@ -168,6 +168,22 @@ func runMigrations(db *gorm.DB) error {
 				return tx.Migrator().DropTable(&model.ClientTraffic{})
 			},
 		},
+		{
+			// 出站服务器 + 入站绑定字段。Outbound 表存用户配置的中转出站,
+			// Inbound.OutboundTag 通过 Tag 引用。两个对象都新增,无需回填:
+			// 老 Inbound 行 OutboundTag 默认空字符串 = 直连(freedom),
+			// 跟旧行为一致。
+			ID: "0011_outbounds",
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(&model.Outbound{}); err != nil {
+					return err
+				}
+				return tx.AutoMigrate(&model.Inbound{})
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return tx.Migrator().DropTable(&model.Outbound{})
+			},
+		},
 	})
 	return m.Migrate()
 }

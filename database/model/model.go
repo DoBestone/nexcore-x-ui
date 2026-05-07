@@ -43,6 +43,13 @@ type Inbound struct {
 	StreamSettings string   `json:"streamSettings" form:"streamSettings"`
 	Tag            string   `json:"tag" form:"tag" gorm:"unique"`
 	Sniffing       string   `json:"sniffing" form:"sniffing"`
+
+	// OutboundTag 关联到 Outbound.Tag(空 = 直连,使用 freedom 出站)。
+	// 设了的话,XrayService.GetXrayConfig 会注入一条 routing 规则
+	// {inboundTag:[this.Tag], outboundTag:OutboundTag, type:"field"},
+	// 把这条入站的流量定向到指定出站做中转。share link 的 ps 字段也会
+	// 用对应 Outbound.Name 替代节点名称作为前缀。
+	OutboundTag string `json:"outboundTag" form:"outboundTag"`
 }
 
 func (i *Inbound) GenXrayInboundConfig() *xray.InboundConfig {
@@ -152,4 +159,26 @@ type BlockRule struct {
 	InboundTag string `json:"inboundTag" form:"inboundTag"` // 留空 = 全局; 填了 = 仅对该入站生效
 	Enable     bool   `json:"enable"     form:"enable"`
 	CreatedAt  int64  `json:"createdAt"  form:"createdAt"`
+}
+
+// Outbound 描述一个用户配置的出站服务器(中转/代理)。inbound 通过
+// OutboundTag 字段关联,XrayService.GetXrayConfig 把它转成 xray 的
+// outbounds[] + 一条 routing 规则,实现"前置入站 → 后置出站"链路。
+//
+// 与 BlockRule 类似:与 Inbound 解耦,删除入站不级联;Tag 全局唯一,
+// 修改时不允许变更(已有 Inbound.OutboundTag 引用)。Settings 与
+// StreamSettings 是 raw JSON,语义完全跟 xray outbound 配置一致;
+// 由 OutboundService 序列化成 xray.OutboundConfig。
+type Outbound struct {
+	Id             int    `json:"id"             form:"id"             gorm:"primaryKey;autoIncrement"`
+	Tag            string `json:"tag"            form:"tag"            gorm:"uniqueIndex"`
+	Name           string `json:"name"           form:"name"`           // 用户可读名,用作 share link 前缀
+	Protocol       string `json:"protocol"       form:"protocol"`       // vless / vmess / trojan / shadowsocks
+	Address        string `json:"address"        form:"address"`        // 可读字段,settings 里也有,这里冗余以便 list UI 一眼看清
+	Port           int    `json:"port"           form:"port"`
+	Settings       string `json:"settings"       form:"settings"`       // raw JSON,xray outbound.settings
+	StreamSettings string `json:"streamSettings" form:"streamSettings"` // raw JSON,xray outbound.streamSettings
+	Remark         string `json:"remark"         form:"remark"`
+	Enable         bool   `json:"enable"         form:"enable"`
+	CreatedAt      int64  `json:"createdAt"      form:"createdAt"`
 }
