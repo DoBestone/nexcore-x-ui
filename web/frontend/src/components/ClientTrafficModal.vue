@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UserFilled, Refresh, ArrowDown } from '@element-plus/icons-vue'
-import { http, post } from '@/api/http'
+import { http, post, del } from '@/api/http'
 import type { ClientTraffic, DBInbound } from '@/api/types'
 import { sizeFormat, fmtTimeMs, isExpired, isMultiUserProtocol } from '@/utils/format'
 import QrcodeDialog from './QrcodeDialog.vue'
@@ -122,11 +122,7 @@ async function doAdd() {
   }
   adding.value = true
   try {
-    await http.post(
-      `xui/api/inbounds/${props.inbound.id}/clients`,
-      client,
-      { headers: { 'Content-Type': 'application/json' } }
-    )
+    await post(`xui/api/inbounds/${props.inbound.id}/clients`, client)
     // 第二步:把额度/到期/启用一次写入 client_traffics。AddClient 那边
     // 用 inbound 级 total/expiry 兜底建行,这里只在用户显式设过非默认
     // 值时才打 PATCH(避免无谓 SQL)。
@@ -134,15 +130,11 @@ async function doAdd() {
     const wantExpiry = newExpiry.value !== null
     const wantDisable = !newEnable.value
     if (wantTotal || wantExpiry || wantDisable) {
-      await http.post(
-        `xui/api/clients/${encodeURIComponent(newEmail.value)}/limits`,
-        {
-          total: wantTotal ? Math.round(newTotalGB.value * 1024 * 1024 * 1024) : 0,
-          expiryTime: newExpiry.value ? newExpiry.value.getTime() : 0,
-          enable: newEnable.value
-        },
-        { headers: { 'Content-Type': 'application/json' } }
-      )
+      await post(`xui/api/clients/${encodeURIComponent(newEmail.value)}/limits`, {
+        total: wantTotal ? Math.round(newTotalGB.value * 1024 * 1024 * 1024) : 0,
+        expiryTime: newExpiry.value ? newExpiry.value.getTime() : 0,
+        enable: newEnable.value
+      })
     }
     ElMessage.success('已添加客户端')
     addVisible.value = false
@@ -175,15 +167,11 @@ function openEdit(r: ClientTraffic) {
 async function applyEdit() {
   saving.value = true
   try {
-    await http.post(
-      `xui/api/clients/${encodeURIComponent(editEmail.value)}/limits`,
-      {
-        total: editTotalGB.value > 0 ? Math.round(editTotalGB.value * 1024 * 1024 * 1024) : 0,
-        expiryTime: editExpiry.value ? editExpiry.value.getTime() : 0,
-        enable: editEnable.value
-      },
-      { headers: { 'Content-Type': 'application/json' } }
-    )
+    await post(`xui/api/clients/${encodeURIComponent(editEmail.value)}/limits`, {
+      total: editTotalGB.value > 0 ? Math.round(editTotalGB.value * 1024 * 1024 * 1024) : 0,
+      expiryTime: editExpiry.value ? editExpiry.value.getTime() : 0,
+      enable: editEnable.value
+    })
     ElMessage.success('已保存')
     editVisible.value = false
     dataChanged = true
@@ -204,11 +192,7 @@ async function resetTraffic(r: ClientTraffic) {
 // ---------- 启停 ----------
 async function toggleEnable(r: ClientTraffic, v: boolean) {
   try {
-    await http.post(
-      `xui/api/clients/${encodeURIComponent(r.email)}/limits`,
-      { enable: v },
-      { headers: { 'Content-Type': 'application/json' } }
-    )
+    await post(`xui/api/clients/${encodeURIComponent(r.email)}/limits`, { enable: v })
     r.enable = v
     dataChanged = true
   } catch {
@@ -228,9 +212,7 @@ async function delClient(r: ClientTraffic) {
     return
   }
   try {
-    await http.delete(
-      `xui/api/inbounds/${props.inbound.id}/clients/${encodeURIComponent(r.email)}`
-    )
+    await del(`xui/api/inbounds/${props.inbound.id}/clients/${encodeURIComponent(r.email)}`)
     ElMessage.success('已删除')
     dataChanged = true
     await reload()

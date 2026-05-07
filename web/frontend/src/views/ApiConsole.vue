@@ -6,7 +6,7 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { Marked } from 'marked'
-import { http, get, post } from '@/api/http'
+import { http, get, post, del } from '@/api/http'
 import type { ApiToken } from '@/api/types'
 
 // docs/api.md 是 panel 自己 go:embed 进二进制的固定内容,可信源,
@@ -85,7 +85,7 @@ async function delToken(t: ApiToken) {
   } catch {
     return
   }
-  await http.delete(`xui/api/tokens/${t.id}`)
+  await del(`xui/api/tokens/${t.id}`)
   ElMessage.success('已删除')
   await loadTokens()
 }
