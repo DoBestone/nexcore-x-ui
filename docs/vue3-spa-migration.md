@@ -1,9 +1,12 @@
-# Vue 3 SPA 迁移清单
+# Vue 3 SPA 迁移清单(已落地,归档)
 
-> 状态:**规划中**,后期版本(建议 2.0)落地
+> 状态:**已完成**(v2.0.0,2026-05-07)
 > 最后更新:2026-05-07
-> 当前栈:Go template + Vue 2.6.12 + ant-design-vue 1.7.2(非 SPA)
-> 目标栈:Go API-only + Vue 3 + Vite + TS + Element Plus(SPA,embed 进单二进制)
+> 当前栈:Go API-only + Vue 3 + Vite + TS + Element Plus(SPA,`go:embed all:frontend/dist`)
+> 历史栈(已删除):Go template + Vue 2.6.12 + ant-design-vue 1.7.2(非 SPA)
+>
+> 本文件保留是因为里面有几条决策动机(为什么 SPA 而不是 SSR、为什么 Element
+> Plus 而不是 Naive UI 等)对未来还有参考价值。下面"迁移步骤"部分纯历史记录。
 
 ---
 

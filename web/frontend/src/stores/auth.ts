@@ -35,8 +35,13 @@ export const useAuthStore = defineStore('auth', {
       await this.refresh()
     },
     async logout() {
+      // POST instead of GET — the panel's logout endpoint is now POST
+      // so it can't be triggered cross-origin by an <img src> CSRF.
+      // originCSRFMiddleware on the same group also requires Origin/
+      // Referer to match Host, which a same-origin SPA fetch supplies
+      // for free.
       try {
-        await http.get('logout')
+        await http.post('logout')
       } catch {
         /* ignore — clear local anyway */
       }

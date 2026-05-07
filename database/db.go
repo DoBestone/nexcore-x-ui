@@ -21,6 +21,14 @@ var (
 func InitDB(dbPath string) error {
 	savedDBPath = dbPath
 	dir := path.Dir(dbPath)
+	// freshDB is true when the file doesn't exist yet — used below to
+	// decide whether to enable auto_vacuum=INCREMENTAL. SQLite only
+	// honours auto_vacuum when set BEFORE the first table is created,
+	// so we can't retrofit it on existing installs without a full VACUUM
+	// (which on a 1GB box can take 30+ seconds). New installs get it
+	// for free; old installs stay on the default (manual VACUUM only).
+	_, statErr := os.Stat(dbPath)
+	freshDB := os.IsNotExist(statErr)
 	// Mode 0700 — only the panel user (root in production) should be
 	// able to enumerate or read the data dir. The previous fs.ModeDir
 	// is a *type bit*, not a permission bits set, so the resulting
@@ -102,6 +110,31 @@ func InitDB(dbPath string) error {
 	// 0600 makes sure secrets-at-rest (settings table, hashed tokens,
 	// magic_tokens) aren't readable by anyone except us.
 	_ = os.Chmod(dbPath, 0o600)
+	// Enable auto_vacuum=INCREMENTAL on brand-new databases ONLY.
+	// Why incremental and not full:
+	//   - FULL auto_vacuum runs on every commit, paying for free-page
+	//     compaction even when nothing was deleted — overhead 1H1G can't
+	//     spare on the streaming traffic-stats hot path.
+	//   - INCREMENTAL never auto-runs; we trigger PRAGMA
+	//     incremental_vacuum(N) from a cron when we want to reclaim
+	//     space (currently we don't, since deletions are tiny — but
+	//     having INCREMENTAL set means we CAN later, without a 30s
+	//     full VACUUM).
+	// Why not retrofit existing DBs: changing auto_vacuum mode requires
+	// a full VACUUM (the docs are explicit), which on a 1GB-RAM machine
+	// can stall every panel request for 10-60s. Not worth the risk for
+	// what is essentially a future-proofing knob.
+	if freshDB {
+		if err := db.Exec("PRAGMA auto_vacuum = INCREMENTAL").Error; err != nil {
+			// Non-fatal: worst case we lose the ability to incremental-
+			// vacuum this DB later. Don't tank InitDB over it.
+			_ = err
+		}
+		// auto_vacuum only takes effect after the first VACUUM following
+		// the PRAGMA on an empty file. The DB IS empty (we just stat'd
+		// no-such-file above) so this is fast, no real data to rewrite.
+		_ = db.Exec("VACUUM").Error
+	}
 	return runMigrations(db)
 }
 

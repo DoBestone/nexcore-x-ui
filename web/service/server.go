@@ -17,6 +17,7 @@ import (
 	"os"
 	"runtime"
 	"time"
+	"nexcore-x-ui/config"
 	"nexcore-x-ui/logger"
 	"nexcore-x-ui/util/sys"
 	"nexcore-x-ui/xray"
@@ -62,6 +63,11 @@ type Status struct {
 		Sent uint64 `json:"sent"`
 		Recv uint64 `json:"recv"`
 	} `json:"netTraffic"`
+	// PanelVersion is the embedded build-time version string
+	// (config/version). Surfacing it on /server/status lets the SPA show
+	// it in the side-bar without a separate endpoint and keeps every
+	// release from having to hand-edit Layout.vue's version label.
+	PanelVersion string `json:"panelVersion"`
 }
 
 type Release struct {
@@ -75,7 +81,8 @@ type ServerService struct {
 func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 	now := time.Now()
 	status := &Status{
-		T: now,
+		T:            now,
+		PanelVersion: config.GetVersion(),
 	}
 
 	percents, err := cpu.Percent(0, false)

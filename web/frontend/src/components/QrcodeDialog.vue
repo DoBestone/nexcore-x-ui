@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import QRCode from 'qrcode'
 import { ElMessage } from 'element-plus'
+
+// qrcode 是 ~50KB 的二维码生成库;面板大多数页面不会触发它(只在
+// Inbounds → 链接 → 二维码弹层里才需要)。改成 dynamic import 之后,
+// QrcodeDialog 第一次打开时才会拉这个 chunk,首屏体积下降一档。
 
 const props = defineProps<{
   modelValue: boolean
@@ -16,6 +19,7 @@ watch(
   () => [props.modelValue, props.link] as const,
   async ([open, link]) => {
     if (open && link) {
+      const QRCode = (await import('qrcode')).default
       dataUrl.value = await QRCode.toDataURL(link, { width: 280, margin: 1 })
     } else {
       dataUrl.value = ''

@@ -14,6 +14,18 @@ on:
 
 permissions:
   contents: write
+  # SLSA build provenance attestation. Required by
+  # actions/attest-build-provenance to mint a signed claim that links
+  # this release tarball back to this exact workflow run, on this exact
+  # commit. Operators (or downstream tooling) can verify with:
+  #     gh attestation verify nexcore-x-ui-linux-amd64.tar.gz \
+  #         --owner DoBestone
+  # which closes the "did THIS binary really come out of THIS repo's CI?"
+  # gap that SHA256 checksums alone don't — checksums prove the release
+  # asset matches the file the publisher uploaded, but say nothing about
+  # who the publisher is or what built it.
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -167,6 +179,17 @@ jobs:
         run: |
           sha256sum *.tar.gz > checksums.txt
           cat checksums.txt
+
+      # Build provenance attestation. Mints SLSA v1 build provenance for
+      # every release tarball and stores it in the GitHub Sigstore
+      # transparency log. Verifiable via `gh attestation verify` (see
+      # the permissions block at the top of this file for the command).
+      # Subject paths must match the actual files we ship; checksums.txt
+      # is intentionally excluded — it's a verification helper, not a
+      # binary the user runs.
+      - uses: actions/attest-build-provenance@173725a1209d09b31f9d30a3890cf2757ebbff0d # v1.4.4
+        with:
+          subject-path: 'dist/*.tar.gz'
 
       - uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
         with:

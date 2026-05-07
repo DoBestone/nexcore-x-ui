@@ -4,16 +4,9 @@
 // 一个 700 行模板里;v2 拆成两个 tab。
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Refresh } from '@element-plus/icons-vue'
 import { http, get, post } from '@/api/http'
-
-interface ApiToken {
-  id: number
-  name: string
-  scope: string
-  createdAt: number
-  expiresAt: number
-  lastUsedAt: number
-}
+import type { ApiToken } from '@/api/types'
 
 const tokens = ref<ApiToken[]>([])
 const docs = ref('')
@@ -112,8 +105,8 @@ onMounted(async () => {
     <el-tabs>
       <el-tab-pane label="访问令牌" lazy>
         <div class="nx-row" style="margin-bottom: 12px">
-          <el-button type="primary" :icon="'Plus'" @click="openCreate">创建 token</el-button>
-          <el-button :icon="'Refresh'" @click="loadTokens" :loading="loading">刷新</el-button>
+          <el-button type="primary" :icon="Plus" @click="openCreate">创建 token</el-button>
+          <el-button :icon="Refresh" @click="loadTokens" :loading="loading">刷新</el-button>
         </div>
         <el-card>
           <el-empty v-if="tokens.length === 0" description="还没有 API token" />
@@ -154,7 +147,7 @@ onMounted(async () => {
       </el-tab-pane>
     </el-tabs>
 
-    <el-dialog v-model="createVisible" title="创建 API token" width="480px">
+    <el-dialog v-model="createVisible" title="创建 API token" width="480px" class="constrained-dialog" :align-center="false">
       <div v-if="!issued">
         <el-form label-width="100px" label-position="left">
           <el-form-item label="名称">

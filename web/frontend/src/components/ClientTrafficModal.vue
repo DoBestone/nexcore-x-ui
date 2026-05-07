@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { UserFilled, Refresh, ArrowDown } from '@element-plus/icons-vue'
 import { http, post } from '@/api/http'
 import type { ClientTraffic, DBInbound } from '@/api/types'
 import { sizeFormat, fmtTimeMs, isExpired, isMultiUserProtocol } from '@/utils/format'
@@ -283,12 +284,14 @@ onBeforeUnmount(() => {
     :model-value="visible"
     :title="`客户端流量 — ${inbound.remark || 'inbound#' + inbound.id}`"
     width="900px"
+    class="constrained-dialog"
+    :align-center="false"
     @close="emit('close', dataChanged)"
     :close-on-click-modal="false"
   >
     <div class="head-actions">
-      <el-button type="primary" :icon="'UserFilled'" @click="openAdd">添加客户端</el-button>
-      <el-button :icon="'Refresh'" @click="reload" :loading="loading">刷新</el-button>
+      <el-button type="primary" :icon="UserFilled" @click="openAdd">添加客户端</el-button>
+      <el-button :icon="Refresh" @click="reload" :loading="loading">刷新</el-button>
       <span class="nx-muted" style="margin-left: 8px">
         VLESS / VMess / Trojan / SS-2022 才有 email 客户
       </span>
@@ -357,7 +360,7 @@ onBeforeUnmount(() => {
     </el-table>
 
     <!-- 添加客户端子 dialog -->
-    <el-dialog v-model="addVisible" title="添加客户端" width="480px" append-to-body>
+    <el-dialog v-model="addVisible" title="添加客户端" width="480px" append-to-body class="constrained-dialog" :align-center="false">
       <el-form label-width="100px" label-position="left">
         <el-form-item label="email">
           <el-input v-model="newEmail" />
@@ -405,7 +408,7 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <!-- 编辑额度 -->
-    <el-dialog v-model="editVisible" title="编辑额度" width="480px" append-to-body>
+    <el-dialog v-model="editVisible" title="编辑额度" width="480px" append-to-body class="constrained-dialog" :align-center="false">
       <el-form label-width="100px" label-position="left">
         <el-form-item label="email">
           <el-input v-model="editEmail" disabled />

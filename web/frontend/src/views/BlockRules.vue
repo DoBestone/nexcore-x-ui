@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, MagicStick, Refresh } from '@element-plus/icons-vue'
 import { postForm } from '@/api/http'
 import type { BlockRule } from '@/api/types'
 
@@ -111,9 +112,9 @@ onMounted(() => reload())
     <h2>屏蔽规则</h2>
 
     <div class="nx-row" style="margin-bottom: 16px">
-      <el-button type="primary" :icon="'Plus'" @click="openAdd">新增规则</el-button>
-      <el-button :icon="'MagicStick'" @click="openPreset">应用预置</el-button>
-      <el-button :icon="'Refresh'" @click="reload" :loading="loading">刷新</el-button>
+      <el-button type="primary" :icon="Plus" @click="openAdd">新增规则</el-button>
+      <el-button :icon="MagicStick" @click="openPreset">应用预置</el-button>
+      <el-button :icon="Refresh" @click="reload" :loading="loading">刷新</el-button>
     </div>
 
     <el-card>
@@ -143,7 +144,7 @@ onMounted(() => reload())
       </el-table>
     </el-card>
 
-    <el-dialog v-model="formVisible" :title="editing.id ? '编辑规则' : '新增规则'" width="520px">
+    <el-dialog v-model="formVisible" :title="editing.id ? '编辑规则' : '新增规则'" width="520px" class="constrained-dialog" :align-center="false">
       <el-form label-width="100px" label-position="left">
         <el-form-item label="类型">
           <el-select v-model="editing.type">
@@ -175,7 +176,7 @@ onMounted(() => reload())
       </template>
     </el-dialog>
 
-    <el-dialog v-model="presetVisible" title="应用屏蔽预置" width="480px">
+    <el-dialog v-model="presetVisible" title="应用屏蔽预置" width="480px" class="constrained-dialog" :align-center="false">
       <el-form label-width="100px" label-position="left">
         <el-form-item label="预置">
           <el-select v-model="presetKey">

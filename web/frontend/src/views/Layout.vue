@@ -1,7 +1,19 @@
 <script setup lang="ts">
+import { onMounted, ref, type Component } from 'vue'
 import { useRoute, useRouter, RouterView } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
+import {
+  Odometer,
+  Connection,
+  Lock,
+  Document,
+  Setting,
+  User,
+  SwitchButton
+} from '@element-plus/icons-vue'
+import type { ServerStatus } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
+import { post } from '@/api/http'
 
 const router = useRouter()
 const route = useRoute()
@@ -10,15 +22,34 @@ const auth = useAuthStore()
 interface NavItem {
   path: string
   title: string
-  icon: string
+  // Component reference, not string — under按需引入 the resolver does
+  // NOT register icons globally, so `<component :is="'Odometer'" />`
+  // wouldn't resolve. Bind a real Component (imported above) and the
+  // template `<component :is="n.icon" />` works regardless of bundle mode.
+  icon: Component
 }
 
+// Panel version surfaced in the side-bar. xray.version is the xray-core
+// build, NOT the panel; panelVersion is the field we added on the
+// server.Status struct so release-cut doesn't have to hand-edit
+// Layout.vue every time. The /xui/server/status route is POST (legacy
+// from vaxilu/x-ui) — post() unwraps {success, msg, obj} for us.
+const panelVersion = ref('')
+onMounted(async () => {
+  try {
+    const s = await post<ServerStatus & { panelVersion?: string }>('xui/server/status')
+    if (s?.panelVersion) panelVersion.value = s.panelVersion
+  } catch {
+    /* server may be down or 401-redirecting; fall back to empty string */
+  }
+})
+
 const nav: NavItem[] = [
-  { path: '/dashboard', title: '系统状态', icon: 'Odometer' },
-  { path: '/inbounds', title: '入站列表', icon: 'Connection' },
-  { path: '/block-rules', title: '屏蔽规则', icon: 'Lock' },
-  { path: '/api-console', title: 'API 控制台', icon: 'Document' },
-  { path: '/settings', title: '面板设置', icon: 'Setting' }
+  { path: '/dashboard', title: '系统状态', icon: Odometer },
+  { path: '/inbounds', title: '入站列表', icon: Connection },
+  { path: '/block-rules', title: '屏蔽规则', icon: Lock },
+  { path: '/api-console', title: 'API 控制台', icon: Document },
+  { path: '/settings', title: '面板设置', icon: Setting }
 ]
 
 // 不用 el-menu — 它的 default-active prop 在 router 模式下经常落后
@@ -51,7 +82,7 @@ async function doLogout() {
         <div class="brand-mark">N</div>
         <div class="brand-text">
           <div class="brand-name">NexCore X-UI</div>
-          <div class="brand-sub">v2.0.2</div>
+          <div class="brand-sub">{{ panelVersion ? 'v' + panelVersion : '面板控制台' }}</div>
         </div>
       </div>
       <nav class="menu">

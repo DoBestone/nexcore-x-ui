@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
+    <!--
+      Base path injection.
+      The Go server (web/web.go::indexHandler) replaces __NX_BASE__ with the
+      panel's actual base path (default "/", or whatever the operator set
+      in Settings → BasePath, e.g. "/admin/"). Axios + vue-router both
+      pick this up at boot so the same SPA bundle works under any base.
+    -->
+    <script>window.__NX_BASE__ = "__NX_BASE__";</script>
     <title>NexCore X-UI</title>
   </head>
   <body>

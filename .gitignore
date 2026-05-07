@@ -8,6 +8,13 @@
 *.out
 dist/
 
+# Vite 插件自动生成的 d.ts —— 每次启动 dev / build 会刷新,不该进 git。
+# unplugin-auto-import 写 auto-imports.d.ts;unplugin-vue-components 写
+# components.d.ts。检入 git 会带来无意义的合并冲突,也会让历史里出现
+# AI 给我们生成的"虚假改动"。CI 上每次 build 会自动重生。
+web/frontend/auto-imports.d.ts
+web/frontend/components.d.ts
+
 # data / runtime
 *.db
 *.db-journal

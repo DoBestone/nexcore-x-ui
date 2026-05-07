@@ -1,10 +1,14 @@
 import axios, { type AxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
+import { basePath } from '@/utils/base'
 
 // SPA 与面板同源,cookie 直接随请求走;dev 模式 vite proxy 把
 // /xui /api /login /logout /server 转到本地 panel 端口。
+//
+// baseURL 用 basePath(末尾保证有 '/'),所有调用点写相对路径(无前导 /),
+// 这样即便面板部署在 /admin/ 这种非根 base path 下也能正确解析。
 export const http = axios.create({
-  baseURL: '/',
+  baseURL: basePath,
   withCredentials: true,
   timeout: 30000,
   headers: {
@@ -16,9 +20,12 @@ http.interceptors.response.use(
   (resp) => resp,
   (err) => {
     if (err.response?.status === 401) {
-      // 401 跳登录,但要避免在登录页递归跳转
-      if (location.pathname !== '/login') {
-        location.replace('/login')
+      // 401 跳登录,但要避免在登录页 / magic-login 上递归跳转
+      const here = location.pathname
+      const loginPath = basePath + 'login'
+      const magicPath = basePath + 'magic-login'
+      if (here !== loginPath && here !== magicPath) {
+        location.replace(loginPath)
       }
     }
     return Promise.reject(err)
