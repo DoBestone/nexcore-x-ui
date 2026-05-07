@@ -2,11 +2,17 @@
 // API 控制台:展示 token 列表 + 创建 / 撤销 + 渲染 docs/api.md。
 // 旧 panel 的 api_console.html 把 markdown 渲染、token CRUD、code preview 揉在
 // 一个 700 行模板里;v2 拆成两个 tab。
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
+import { Marked } from 'marked'
 import { http, get, post } from '@/api/http'
 import type { ApiToken } from '@/api/types'
+
+// docs/api.md 是 panel 自己 go:embed 进二进制的固定内容,可信源,
+// 渲染时不接 dompurify;只需要 markdown → HTML。表格 / 围栏代码 /
+// 列表都靠 marked 自身,GFM 默认开。
+const md = new Marked({ gfm: true, breaks: false })
 
 const tokens = ref<ApiToken[]>([])
 const docs = ref('')
@@ -29,6 +35,11 @@ async function loadDocs() {
     docs.value = '# API 文档加载失败'
   }
 }
+
+// docs 是 markdown 源,docsHtml 是 marked 渲染出的 HTML。Tab 切到
+// "API 文档" 时直接 v-html 进 .md-body 容器,样式给标题 / 表格 / 代码块
+// 上格调,跟 element-plus 主题对齐。
+const docsHtml = computed(() => (docs.value ? (md.parse(docs.value) as string) : ''))
 
 const createVisible = ref(false)
 const newName = ref('')
@@ -142,7 +153,9 @@ onMounted(async () => {
 
       <el-tab-pane label="API 文档" lazy>
         <el-card>
-          <pre class="md">{{ docs }}</pre>
+          <!-- docs/api.md 是 panel 嵌入的可信源,不走 dompurify。
+               .md-body 给渲染产物加 prose 风格(标题 / 表格 / 代码块)。 -->
+          <div class="md-body" v-html="docsHtml"></div>
         </el-card>
       </el-tab-pane>
     </el-tabs>
@@ -181,13 +194,115 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.md {
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: ui-monospace, monospace;
-  font-size: 12.5px;
+/* .md-body — markdown 渲染产物的排版。:deep() 是为了穿透 scoped 选择器
+ * 把样式作用到 v-html 注入的标准 HTML 元素;不用 prose-style 库,
+ * 标准元素手写一遍体积更小,色板对接 nx-* / el-* 变量,亮 / 暗主题
+ * 自动联动。 */
+.md-body {
+  font-size: 13.5px;
+  line-height: 1.7;
   color: var(--nx-text);
-  margin: 0;
+  word-break: break-word;
+}
+.md-body :deep(h1),
+.md-body :deep(h2),
+.md-body :deep(h3) {
+  color: var(--nx-text-strong);
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 1.5em 0 0.6em;
+}
+.md-body :deep(h1) {
+  font-size: 22px;
+  border-bottom: 1px solid var(--nx-border);
+  padding-bottom: 0.3em;
+  margin-top: 0;
+}
+.md-body :deep(h2) {
+  font-size: 18px;
+  border-bottom: 1px solid var(--nx-border);
+  padding-bottom: 0.2em;
+}
+.md-body :deep(h3) {
+  font-size: 15.5px;
+}
+.md-body :deep(p) {
+  margin: 0.7em 0;
+}
+.md-body :deep(ul),
+.md-body :deep(ol) {
+  padding-left: 1.6em;
+  margin: 0.7em 0;
+}
+.md-body :deep(li) {
+  margin: 0.25em 0;
+}
+.md-body :deep(a) {
+  color: var(--nx-primary);
+  text-decoration: none;
+}
+.md-body :deep(a:hover) {
+  text-decoration: underline;
+}
+.md-body :deep(code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  background: var(--el-fill-color-light, rgba(0, 0, 0, 0.05));
+  padding: 1px 5px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+.md-body :deep(pre) {
+  background: var(--el-fill-color-light, #f6f7f9);
+  border: 1px solid var(--nx-border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0.9em 0;
+  line-height: 1.55;
+}
+.md-body :deep(pre code) {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 12.5px;
+  word-break: normal;
+  white-space: pre;
+}
+.md-body :deep(table) {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  font-size: 13px;
+  width: 100%;
+}
+.md-body :deep(th),
+.md-body :deep(td) {
+  border: 1px solid var(--nx-border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-body :deep(th) {
+  background: var(--el-fill-color-light, #f6f7f9);
+  font-weight: 600;
+  color: var(--nx-text-strong);
+}
+.md-body :deep(blockquote) {
+  margin: 0.8em 0;
+  padding: 0.4em 1em;
+  color: var(--nx-text-muted);
+  border-left: 3px solid var(--nx-border);
+  background: var(--el-fill-color-light, #f6f7f9);
+  border-radius: 0 6px 6px 0;
+}
+.md-body :deep(hr) {
+  border: 0;
+  border-top: 1px solid var(--nx-border);
+  margin: 1.6em 0;
+}
+.md-body :deep(strong) {
+  color: var(--nx-text-strong);
+  font-weight: 600;
 }
 .issued {
   background: var(--nx-bg);
