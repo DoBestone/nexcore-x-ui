@@ -359,17 +359,23 @@ func projectInbounds(items []*model.Inbound, full bool) any {
 	out := make([]gin.H, 0, len(items))
 	for _, in := range items {
 		out = append(out, gin.H{
-			"id":         in.Id,
-			"port":       in.Port,
-			"protocol":   in.Protocol,
-			"tag":        in.Tag,
-			"remark":     in.Remark,
-			"enable":     in.Enable,
-			"listen":     in.Listen,
-			"up":         in.Up,
-			"down":       in.Down,
-			"total":      in.Total,
-			"expiryTime": in.ExpiryTime,
+			"id":          in.Id,
+			"port":        in.Port,
+			"protocol":    in.Protocol,
+			"tag":         in.Tag,
+			"remark":      in.Remark,
+			"enable":      in.Enable,
+			"listen":      in.Listen,
+			"up":          in.Up,
+			"down":        in.Down,
+			"total":       in.Total,
+			"expiryTime":  in.ExpiryTime,
+			// outboundTag 是路由/中转关系的关键字段(空 = 直连;非空 = 入站
+			// 的流量在 xray rules 里被定向到对应 outbound)。业务系统拉
+			// 入站列表做"哪条入站走哪个出口"的对账时必须有它,否则只能
+			// fallback 到 ?full=1 拉巨大的 settings/streamSettings 字节,
+			// 跟 slim 视图"省 80% 流量"的初衷冲突。
+			"outboundTag": in.OutboundTag,
 		})
 	}
 	return out

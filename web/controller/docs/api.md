@@ -538,22 +538,25 @@ curl -H "Authorization: Bearer $TOKEN" \
 {
   "data": [
     {
-      "id":         3,
-      "port":       443,
-      "protocol":   "vless",
-      "tag":        "inbound-443",
-      "remark":     "node-A",
-      "enable":     true,
-      "listen":     "",
-      "up":         123456789,
-      "down":       987654321,
-      "total":      0,
-      "expiryTime": 0
+      "id":          3,
+      "port":        443,
+      "protocol":    "vless",
+      "tag":         "inbound-443",
+      "remark":      "node-A",
+      "enable":      true,
+      "listen":      "",
+      "up":          123456789,
+      "down":        987654321,
+      "total":       0,
+      "expiryTime":  0,
+      "outboundTag": ""
     }
   ],
   "meta": { "total": 12, "page": 1, "size": 20, "full": false }
 }
 ```
+
+> `outboundTag` **v2.5.1+** 进入裁剪视图。空串 = 直连(走 freedom);非空 = 该入站流量被路由到对应 Outbound.tag。业务系统拉列表做"哪条入站走哪个出口"对账时直接读这个字段,不必 `?full=1` 拉巨大的 settings 字节。
 
 | 响应字段 | 类型 | 说明 |
 |---|---|---|
