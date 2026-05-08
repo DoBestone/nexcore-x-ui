@@ -1752,12 +1752,31 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 部分更新。**merge 语义**:把请求体反序列化进当前设置对象,**没传的字段保留原值**。
 
-要改子项时,传最小化 body 即可:
+要改子项时,传最小化 body 即可。常用可改字段:
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `nodeName` | string | 节点名称(如 `香港-A`)。share 链接 ps/remarks 字段加 `[<nodeName>] ` 前缀,客户端导入订阅一眼能看出来源节点。空 = 不加前缀 |
+| `nodeAddress` | string | 分享链接里写的节点 host。空 = 用浏览器访问面板的域名/IP。CF 橙云代理场景必须显式配,否则链接落到 CF 代理域上,客户端打 xray 端口超时 |
+| `onlineWebhookUrl` / `onlineWebhookSecret` / `onlineWebhookNodeId` | string | 在线 IP webhook 推送(跨节点设备数聚合)。空 URL 禁用 |
+| `webPort` / `webBasePath` / `webListen` / `webCertFile` / `webKeyFile` | mixed | 面板监听(改完面板会重启,session 会断) |
+| `xrayTemplateConfig` | string (JSON) | xray 配置模板。**注意是 JSON 字符串**,不是嵌套对象 |
+| `secureEntryEnabled` / `secureEntryPath` | bool / string | 安全入口。启用前必须先 set path |
 
 ```bash
+# 改节点名称(最常见的场景:批量初始化新节点时给每台贴个名字)
 curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -X PATCH $BASE/settings -d '{"subAllowedHosts": "node.example.com"}'
+  -X PATCH $BASE/settings -d '{"nodeName": "香港-A"}'
+
+# 一次改多个字段
+curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -X PATCH $BASE/settings -d '{
+    "nodeName": "香港-A",
+    "nodeAddress": "node-a.example.com"
+  }'
 ```
+
+**密码 / token 类字段(`tgBotToken` / `onlineWebhookSecret` / `cfApiToken`)走"空字符串视为不修改"**:GET /settings 不回读明文(永远空),PATCH 传空保留旧值,要清空必须传一个非空再清。
 
 **响应示例:** 全部设置(更新后)。
 

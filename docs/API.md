@@ -193,7 +193,7 @@ email 全局唯一,以下接口走 email 索引:
 | Method | Path | Scope | 说明 |
 |---|---|---|---|
 | GET | `/settings` | readonly | 全部面板配置 |
-| PATCH | `/settings` | admin | 部分更新 |
+| PATCH | `/settings` | admin | 部分更新(merge 语义,只传要改的字段)。可改:`nodeName` / `nodeAddress` / `onlineWebhookUrl` / `onlineWebhookSecret` / `onlineWebhookNodeId` / `webPort` / `webBasePath` / `xrayTemplateConfig` / `secureEntryEnabled` / `secureEntryPath` 等。例:`PATCH /settings -d '{"nodeName":"香港-A"}'` |
 | POST | `/settings/api-token/rotate` | admin | 轮换单 token(legacy 模式;多 token 用 `/tokens`) |
 | GET | `/certs` | readonly | TLS 证书列表 |
 | POST | `/certs` | admin | 上传证书 |
