@@ -1,7 +1,22 @@
 [Unit]
 Description=NexCore x-ui panel
-After=network.target
-Wants=network.target
+# network-online.target = "network is actually up with an IP", whereas
+# network.target only means "network config has been processed". On
+# many cloud images (cloud-init, NetworkManager-wait-online) the panel
+# would otherwise race DHCP/DNS on first boot and flap until the
+# Restart= policy eventually caught up.
+After=network-online.target
+Wants=network-online.target
+
+# Crash-loop circuit breaker: if the unit fails to start more than
+# StartLimitBurst times within StartLimitIntervalSec seconds, systemd
+# stops re-spawning it. Without this, a misconfigured panel (bad DB,
+# missing cert, port already bound) would be restarted forever, burning
+# CPU and drowning the journal. With it, after 5 fails in 5 minutes the
+# unit lands in "failed" state and waits for an operator. Recover with:
+#   systemctl reset-failed nexcore-x-ui && systemctl start nexcore-x-ui
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
