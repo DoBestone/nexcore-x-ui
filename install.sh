@@ -310,18 +310,12 @@ wait_for_active() {
     return 1
 }
 
-# 等到面板端口在监听 / install-info.txt 出现 / setting -show 能读到 admin user
-# 为止,任意一个达成就算"准备好了"。最长 30s。
+# 等到 setting -show 能读到 admin user 为止 — 这意味着 RunFirstRunSetup
+# 已经把首装 admin 写进 users 表(也就是说 banner 已经在 journal 里了)。
+# 最长 30s。v2.1.2 之前还会同时检查 install-info.txt,该文件已废除。
 wait_for_ready() {
-    local info_file="${DATA_DIR}/install-info.txt"
     for i in $(seq 1 30); do
-        if [[ -f "${info_file}" ]]; then
-            return 0
-        fi
-        # `setting -show` 返回退出码 0 即视为面板侧已经就绪,即便 install-info.txt
-        # 因为某种原因(磁盘满/sandbox)没写出来 — DB 是真理之源,文件是补充。
         if "${INSTALL_DIR}/${CMD_NAME}" setting -show >/dev/null 2>&1; then
-            # ensure user row really exists; setting -show prints even on empty DB
             local username
             username=$("${INSTALL_DIR}/${CMD_NAME}" setting -show 2>/dev/null \
                 | awk -F': *' '/^  username:/{print $2; exit}')
@@ -334,29 +328,43 @@ wait_for_ready() {
     return 1
 }
 
+# 从 journal 提取首装 banner 里的明文密码。binary 在 RunFirstRunSetup
+# 成功时把 password 直接 fmt.Println 到 stdout,systemd 捕获到 journal,
+# 这是 v2.1.3 起密码的唯一持久化位置(没再写 install-info.txt)。
+#
+# 我们用 --output=cat 去掉时间戳前缀,grep 锁定 "  password:   <值>"
+# 那一行;awk 取最近一次 "first-run install info" banner 之后那条。
+extract_banner_password() {
+    journalctl -u "${CMD_NAME}" --since "10 minutes ago" --no-pager --output=cat 2>/dev/null \
+        | awk '/first-run install info/{found=1; pwd=""}
+               found && /^[[:space:]]*password:/{pwd=$0}
+               END{print pwd}' \
+        | sed -E 's/^[[:space:]]*password:[[:space:]]+//'
+}
+
 show_credentials() {
-    local info_file="${DATA_DIR}/install-info.txt"
     echo
     echo -e "${green}═════════════════════════════════════════════${plain}"
     echo -e "${green}  NexCore x-ui 已部署${plain}"
     echo -e "${green}═════════════════════════════════════════════${plain}"
 
-    # Source-of-truth-first: DB-live readback. install-info.txt is shown as
-    # a supplemental snapshot when present (it has the plaintext password,
-    # which DB-live cannot recover post-bcrypt).
-    if [[ -f "${info_file}" ]]; then
-        cat "${info_file}"
+    # 1) DB-live: 端口 / listen / base path / secureEntry / TLS / username / 完整 URL
+    "${INSTALL_DIR}/${CMD_NAME}" setting -show || \
+        warn "setting -show 失败 — 试试: ${cyan}journalctl -u ${CMD_NAME} -n 80${plain}"
+
+    # 2) 明文密码 — 只此一次,从 journal 提取。binary 在首装 banner 里 println 一次,
+    # 之后 bcrypt 哈希进 DB,无法恢复。错过这次显示就只能 ${CMD_NAME} reset。
+    local pwd
+    pwd="$(extract_banner_password)"
+    if [[ -n "${pwd}" ]]; then
         echo
-        echo -e "  ${yellow}重要:${plain} 记录后请删除该文件 — \`rm ${info_file}\`"
-        echo -e "  (24h 后面板会自动清理它)"
+        echo -e "  ${yellow}首装明文密码 (★ 立即记录,后续无法回查):${plain}"
+        echo -e "    ${green}${pwd}${plain}"
     else
-        warn "install-info.txt 未生成 — 走 DB 实时读"
         echo
-        # setting -show 实时读 DB,显示 username + 端口 + 完整 URL
-        "${INSTALL_DIR}/${CMD_NAME}" setting -show || \
-            warn "setting -show 失败 — 试试: ${cyan}journalctl -u ${CMD_NAME} -n 80${plain}"
-        echo
-        echo -e "  ${yellow}注:${plain} 密码 bcrypt 不可逆,如已忘记请用 \`${CMD_NAME} reset\` 重置"
+        warn "未在 journal 里抓到首装密码 banner — 用下面命令自查:"
+        echo -e "    ${cyan}journalctl -u ${CMD_NAME} | grep -E 'panel port|username|password' | tail -10${plain}"
+        echo -e "  或直接重置一份新密码: ${cyan}${CMD_NAME} reset${plain}"
     fi
 
     echo
@@ -406,9 +414,9 @@ step "等待面板首次初始化完成(InitDB + 创建 admin)…"
 if wait_for_ready; then
     ok "面板就绪"
 else
-    warn "30s 内没看到 admin 用户落库 — 凭据可能在 journal 而不是 install-info.txt 里"
+    warn "30s 内没看到 admin 用户落库 — 看 RunFirstRunSetup 是否报错"
     echo -e "  最近日志:"
-    journalctl -u "${CMD_NAME}" -n 30 --no-pager | grep -E 'NexCore|first-run|panel port|username|password' || \
+    journalctl -u "${CMD_NAME}" -n 30 --no-pager | grep -E 'NexCore|first-run|panel port|username|password|error|warn' || \
         journalctl -u "${CMD_NAME}" -n 30 --no-pager
 fi
 

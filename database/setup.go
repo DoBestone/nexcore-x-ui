@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"time"
 
 	"gorm.io/gorm"
 
@@ -14,7 +13,21 @@ import (
 	"nexcore-x-ui/util/random"
 )
 
-const installInfoFilename = "install-info.txt"
+// legacyInstallInfoFilename was the on-disk plaintext credential snapshot
+// dropped at <data-dir>/install-info.txt by versions ≤ v2.1.2 on first
+// run. Starting v2.1.3 the binary never creates this file: the credentials
+// banner is printed to stdout (which systemd captures into journalctl,
+// the canonical spot operators look) and that's the single copy. Keeping
+// a 0600 file around with the plaintext password — even with a 24h
+// auto-expire — was an unforced disclosure surface (backup copies,
+// container snapshots, CI logs, BackupShell PITR tools).
+//
+// CleanupLegacyInstallInfo deletes the file on every startup so an
+// in-place upgrade from v2.1.x → v2.1.3 doesn't leave stale plaintext
+// behind. The function is best-effort: errors are intentionally swallowed
+// because failure here just means the file lives one more boot, never a
+// regression in correctness.
+const legacyInstallInfoFilename = "install-info.txt"
 
 // FirstRunInfo describes what happened during a first-run setup pass.
 // Generated == false means "already configured, nothing to do".
@@ -23,14 +36,14 @@ type FirstRunInfo struct {
 	Username  string
 	Password  string // plaintext; only valid for the lifetime of this call
 	Port      int
-	InfoPath  string
 }
 
 // RunFirstRunSetup is called once after migrations on every server start.
 // On the very first run (no users + no webPort setting) it generates a
-// random username, password and panel port; persists them; and writes a
-// human-readable install-info.txt next to the database. The install script
-// can grep this file to print the credentials to the operator.
+// random username, password and panel port and persists them. The caller
+// is responsible for surfacing the credentials to the operator —
+// runWebServer prints the banner to stdout where systemd routes it into
+// journalctl, the only place those credentials live going forward.
 //
 // On subsequent runs it returns Generated:false and does nothing.
 func RunFirstRunSetup(dbPath string) (*FirstRunInfo, error) {
@@ -83,25 +96,6 @@ func RunFirstRunSetup(dbPath string) (*FirstRunInfo, error) {
 		info.Port = currentPort
 	}
 
-	// install-info.txt is a *convenience snapshot* — operators love being
-	// able to `cat` the file rather than scrape journalctl. But the actual
-	// source of truth is the DB row we just wrote (admin user) and the
-	// fact that GetFirstUser will return that user from now on.
-	//
-	// Earlier versions returned (info, err) on file-write failure, which
-	// caused the runWebServer caller to skip the credentials banner
-	// entirely — leaving operators with NO way to recover the random
-	// password short of running `nexcore-x-ui reset`. We now degrade
-	// gracefully: file-write failure is logged but does not poison
-	// info.Generated, so the caller still prints the banner to stdout
-	// (which systemd captures into journalctl, where it is greppable).
-	if err := writeInstallInfo(dbPath, info); err != nil {
-		// Caller logs to logger; we annotate the info path so the banner
-		// can show "(write to disk failed; this banner is the only copy)"
-		// and the operator knows to record it now.
-		info.InfoPath = ""
-		return info, fmt.Errorf("write install-info.txt failed (banner is the only copy of the password): %w", err)
-	}
 	return info, nil
 }
 
@@ -122,27 +116,6 @@ func randomFreePortCandidate() int {
 	return 38421 // deterministic fallback
 }
 
-func writeInstallInfo(dbPath string, info *FirstRunInfo) error {
-	dir := path.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	fp := path.Join(dir, installInfoFilename)
-	info.InfoPath = fp
-	body := fmt.Sprintf(`NexCore x-ui · install info
-generated: %s
-
-panel port: %d
-username:   %s
-password:   %s
-
-The login URL is http://<server-ip>:%d
-You can change all of these from "面板设置" after the first login.
-This file is mode 0600 — delete it once you've recorded the values.
-`, time.Now().Format(time.RFC3339), info.Port, info.Username, info.Password, info.Port)
-	return os.WriteFile(fp, []byte(body), 0o600)
-}
-
 func hasSetting(key string) bool {
 	var s model.Setting
 	err := db.Where("`key` = ?", key).First(&s).Error
@@ -161,65 +134,19 @@ func readSettingInt(key string, fallback int) int {
 	return n
 }
 
-// RemoveInstallInfo deletes the install-info.txt snapshot if present. Called
-// after operator-driven mutations (password / port change) since the snapshot
-// can no longer be reconstructed from a bcrypt hash and is misleading once
-// values have diverged. Errors are intentionally swallowed (best-effort).
-func RemoveInstallInfo() {
-	if savedDBPath == "" {
-		return
-	}
-	fp := path.Join(path.Dir(savedDBPath), installInfoFilename)
-	_ = os.Remove(fp)
-}
-
-// installInfoMaxAge is the soft TTL of install-info.txt. The file is
-// 0600 and only contains the *initial* admin credentials, but operators
-// frequently forget to delete it; on a long-lived host the cleartext
-// password lingers in the panel's data directory indefinitely. After
-// the TTL elapses we delete the file on the next boot — by then the
-// admin has either logged in (in which case they know the password) or
-// the panel is unattended and a stale file is more dangerous than
-// helpful.
+// CleanupLegacyInstallInfo wipes the legacy install-info.txt file dropped
+// by versions ≤ v2.1.2. Called once at startup. Best-effort: a failure
+// here just means the file survives one more boot, no correctness impact.
 //
-// 24h is a deliberate compromise: long enough that an operator can run
-// the installer, walk away, come back the next morning, and still find
-// their initial credentials; short enough that "I'll deal with it later"
-// doesn't turn into "still there a year later".
-const installInfoMaxAge = 24 * time.Hour
-
-// MaybeExpireInstallInfo deletes install-info.txt if it is older than
-// installInfoMaxAge. Called once at startup right after first-run setup.
-// Quietly does nothing if the file is missing, fresh, or unreadable —
-// the file is best-effort to begin with.
-func MaybeExpireInstallInfo(dbPath string) {
+// Kept as a separate function (vs. inlined in runWebServer) so any future
+// caller that wants to scrub the file out-of-band — say a CLI subcommand
+// or a forensics audit — has a stable entry point.
+func CleanupLegacyInstallInfo(dbPath string) {
 	if dbPath == "" {
 		return
 	}
-	fp := path.Join(path.Dir(dbPath), installInfoFilename)
-	info, err := os.Stat(fp)
-	if err != nil {
-		return
-	}
-	if time.Since(info.ModTime()) < installInfoMaxAge {
-		return
-	}
+	fp := path.Join(path.Dir(dbPath), legacyInstallInfoFilename)
 	_ = os.Remove(fp)
-}
-
-// PreserveFirstRunInfoOnce reads install-info.txt back so a tool like the
-// install.sh wrapper can echo the credentials after the binary started.
-// Returns nil, nil when the file does not exist.
-func PreserveFirstRunInfoOnce(dbPath string) (*FirstRunInfo, error) {
-	fp := path.Join(path.Dir(dbPath), installInfoFilename)
-	if _, err := os.Stat(fp); errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	} else if err != nil {
-		return nil, err
-	}
-	// We do not parse the file (it is human-formatted). install.sh just
-	// cats it.
-	return &FirstRunInfo{InfoPath: fp}, nil
 }
 
 // Compile-time guard against accidental gorm drift.

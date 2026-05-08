@@ -28,7 +28,20 @@ INSTALL_DIR="${INSTALL_DIR:-/usr/local/${CMD_NAME}}"
 SERVICE_NAME="${CMD_NAME}"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DB_FILE="${DATA_DIR}/${CMD_NAME}.db"
-INFO_FILE="${DATA_DIR}/install-info.txt"
+
+# extract_banner_password 从 journal 抓首装明文密码 banner。v2.1.3 起,
+# binary 不再把凭据写到 install-info.txt,而是 fmt.Println 一次到 stdout
+# 由 systemd 收到 journal。这条函数把那一行抠出来给 cmd_creds / cmd_reset
+# 复用,免得每个命令都 awk 一遍。journalctl --since 给个时间窗(默认 1 天)
+# 限制扫描量;如果首装 banner 已经被 journal 滚掉,则函数返回空字符串。
+extract_banner_password() {
+    local since="${1:-1 day ago}"
+    journalctl -u "${SERVICE_NAME}" --since "${since}" --no-pager --output=cat 2>/dev/null \
+        | awk '/first-run install info/{found=1; pwd=""}
+               found && /^[[:space:]]*password:/{pwd=$0}
+               END{print pwd}' \
+        | sed -E 's/^[[:space:]]*password:[[:space:]]+//'
+}
 
 ASSUME_YES=false
 QUIET=false
@@ -92,10 +105,10 @@ cmd_install() {
 }
 
 # update 是日常升级路径,刻意不走 install.sh:
-#   - 不动 systemd unit(保留你 Environment= 等自定义)
 #   - 不重装系统依赖(apt-get 慢且无意义)
-#   - 不动 ${DATA_DIR}/(数据库 + install-info.txt 完整保留)
-#   - 只:下载 tarball → stop → 替换二进制+脚本+xray binary → start
+#   - 不动 ${DATA_DIR}/(数据库完整保留)
+#   - .service 文件 release 中如有变更则会刷新 + 备份旧版(v2.1.2+)
+#   - drop-in 文件(${SERVICE_FILE}.d/*)永不动
 # 想做完整重装请改用 \`${CMD_NAME} install\`。
 cmd_update() {
     require_installed
@@ -208,27 +221,30 @@ cmd_uninstall() {
 
 cmd_creds() {
     require_installed
-    # 真理之源是 DB,install-info.txt 只是首装时一次性写入的明文密码快照。
-    # 旧实现把 install-info.txt 当作主路径,文件不在就 fallback 到 setting -show —
-    # 但 setting -show 在 binary 早期版本里遇到空用户表会 nil-deref 退出非 0,
-    # 触发 || warn 分支,操作员看到"binary 不支持 setting -show",误以为版本不对。
-    # 现在永远先 setting -show(已 panic-safe),拿到端口/URL/用户名;
-    # 然后 install-info.txt 只在存在时作为补充展示明文密码。
+    # v2.1.3 起,凭据只活在两个地方:
+    #   1. DB 里 — 端口 / username / 全部 settings(密码是 bcrypt,看不到明文)
+    #   2. journal 里 — RunFirstRunSetup 那一刻 println 的明文密码 banner
+    # 所以 cmd_creds 也只做这两件事:setting -show + journal grep。
+    # 不再有 install-info.txt 这个中间文件。
     hdr "当前实际设置 (read-from-DB)"
     "${INSTALL_DIR}/${CMD_NAME}" setting -show || \
         warn "setting -show 返回非 0 — 看 ${C}journalctl -u ${SERVICE_NAME} -n 80${N}"
 
-    if [[ -f "${INFO_FILE}" ]]; then
+    # 试图在 journal 里捞首装明文密码。如果 journal retention 够长就能拿到;
+    # 否则只能告诉操作员去 reset。binary 改过密码 / 从面板内改过 都不会出现新 banner,
+    # 这条路径**只对从未改过密码的"首装窗口"操作员有意义**。
+    local pwd
+    pwd="$(extract_banner_password "30 days ago")"
+    if [[ -n "${pwd}" ]]; then
         echo
-        hdr "首装明文凭据快照 (install-info.txt)"
-        cat "${INFO_FILE}"
+        hdr "首装明文密码 (从 journal 提取)"
+        echo "  ${C}${pwd}${N}"
         echo
-        info "以上明文密码仅首装窗口期可见;在面板里改过密码后,binary 会主动删除该文件"
-        info "记录后建议立即 ${C}rm ${INFO_FILE}${N},或等 24h 自动过期清理"
+        info "若已在面板里改过密码,以上是首装时的旧密码,与当前不一致"
     else
         echo
-        warn "install-info.txt 不存在 — 你要么已经在面板里改过密码,要么从未生成过"
-        warn "密码经 bcrypt 哈希存储,无法还原明文。忘了请用:${C}${CMD_NAME} reset${N}"
+        warn "journal 里没找到首装密码 banner(retention 滚了 / 装机超过 30 天)"
+        warn "已经记不起密码?直接 ${C}${CMD_NAME} reset${N} 强制重新生成一份"
     fi
 }
 
@@ -258,7 +274,6 @@ cmd_reset() {
     fi
 
     systemctl stop "${SERVICE_NAME}"
-    rm -f "${INFO_FILE}"
 
     if command -v sqlite3 >/dev/null 2>&1; then
         # 单事务清掉 admin user + webPort 设置(其它设置保留,例如 secureEntry / TLS)。
@@ -285,29 +300,42 @@ SQL
 
     systemctl start "${SERVICE_NAME}"
 
-    # 主动等到面板起来 + admin 用户重新落库,而不是裸 sleep 2。
+    # 主动等 admin 用户重新落库,而不是裸 sleep 2。binary 起来后跑 RunFirstRunSetup
+    # 重新生成 admin + 端口,setting -show 就能读到非"(未创建)"的 username。
     info "等待面板重新初始化…"
+    local ready=false
     for i in $(seq 1 30); do
-        if [[ -f "${INFO_FILE}" ]]; then break; fi
         if "${INSTALL_DIR}/${CMD_NAME}" setting -show 2>/dev/null \
                 | awk -F': *' '/^  username:/{print $2}' \
                 | grep -qvE '^\(未创建\)|^$'; then
+            ready=true
             break
         fi
         sleep 1
     done
 
-    if [[ -f "${INFO_FILE}" ]]; then
-        cat "${INFO_FILE}"
+    echo
+    hdr "DB 实时状态"
+    "${INSTALL_DIR}/${CMD_NAME}" setting -show || true
+
+    # 从 journal 抓刚才 RunFirstRunSetup 打出的新密码。reset 触发的 banner
+    # 是"刚刚",时间窗 5 分钟足够大且不会撞历史 banner。
+    local pwd
+    pwd="$(extract_banner_password "5 minutes ago")"
+    if [[ -n "${pwd}" ]]; then
         echo
-        info "记录后建议立即 ${C}rm ${INFO_FILE}${N}"
+        hdr "新生成的明文密码"
+        echo "  ${C}${pwd}${N}"
+        echo
+        info "★ 立即记录,bcrypt 不可逆 — 这条 banner 在 journal retention 滚走后就没了"
     else
-        warn "install-info.txt 仍未生成 — 凭据落在了 journal 里"
         echo
-        info "找新密码:${C}journalctl -u ${SERVICE_NAME} -n 80 | grep -E 'username|password|panel port'${N}"
-        echo
-        hdr "DB 实时状态"
-        "${INSTALL_DIR}/${CMD_NAME}" setting -show || true
+        if ${ready}; then
+            warn "服务已就绪但 journal 里没抓到新 banner — 可能 journal 被旧实例的输出污染"
+            info "手动查找:${C}journalctl -u ${SERVICE_NAME} --since '5 minutes ago' | grep -E 'username|password|panel port'${N}"
+        else
+            warn "30s 内服务未就绪 — 看 ${C}journalctl -u ${SERVICE_NAME} -n 100${N} 找原因"
+        fi
     fi
 }
 
@@ -341,11 +369,11 @@ cmd_port() {
 # ---------- group: panel access ----------
 
 panel_port() {
-    if [[ -f "${INFO_FILE}" ]]; then
-        grep -oE 'panel port: [0-9]+' "${INFO_FILE}" | awk '{print $3}' | head -1
-    else
-        "${INSTALL_DIR}/${CMD_NAME}" setting -show 2>/dev/null | awk -F': ' '/^port:/{print $2}'
-    fi
+    # v2.1.3+ setting -show 永远工作(panic-safe),不再 fallback 到 install-info.txt。
+    # 输出格式 "  port:           54321" — F: 分隔取第二段后再 trim。
+    "${INSTALL_DIR}/${CMD_NAME}" setting -show 2>/dev/null \
+        | awk -F': *' '/^[[:space:]]*port:/{print $2; exit}' \
+        | tr -d ' '
 }
 
 local_ip() {
@@ -388,7 +416,11 @@ cmd_magic() {
 cmd_backup() {
     require_installed
     local out="${1:-./${CMD_NAME}-backup-$(date +%Y%m%d-%H%M%S).tar.gz}"
-    warn "备份会包含 install-info.txt(若存在,含明文初始密码)与 sqlite 数据库"
+    # v2.1.3 起 install-info.txt 已废,备份的敏感内容是 sqlite DB 里的:
+    # bcrypt 密码哈希、加密的 API token、Telegram bot token、CF API token、
+    # session secret 等。明文密码/token 不直接落盘,但攻击者拿到这个 tar
+    # 仍可离线撞密码或解密 settings(若一并拿到 .secret-key 文件)。
+    warn "备份包含 sqlite 数据库:bcrypt 密码哈希、加密的 API/Telegram/CF token、流量记录"
     warn "请妥善保管 ${out},不要上传到公开存储"
     tar -czf "${out}" -C "$(dirname "${DATA_DIR}")" "$(basename "${DATA_DIR}")"
     chmod 600 "${out}"
@@ -854,7 +886,7 @@ ${B}install${N}
   uninstall                         卸载并清理 ${DATA_DIR}
 
 ${B}credentials${N}
-  creds | info                      显示 install-info.txt
+  creds | info                      显示当前面板设置 + 从 journal 提取首装明文密码
   reset                             重置账号密码 + 端口为新随机值
   passwd <user> <pass>              改账号密码
   port [N]                          显示或设置面板端口

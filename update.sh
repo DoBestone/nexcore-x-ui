@@ -6,10 +6,11 @@
 #   bash <(curl -Ls https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/update.sh) v1.2.3
 #
 # 与 install.sh 的区别:
-#   - 不动 systemd unit(保留你 Environment= 等自定义)
 #   - 不重装系统依赖
-#   - 不动 ${DATA_DIR}/(数据库 + install-info.txt 完整保留)
-#   - 只:下载 tarball → stop → 替换二进制+脚本+xray binary → start
+#   - 不动 ${DATA_DIR}/(数据库完整保留)
+#   - .service 文件 release 中变化时刷 + 备份旧版到 .bak.<timestamp>(v2.1.2+);
+#     drop-in 文件(${SERVICE_FILE}.d/*)永不动 — 那是操作员的定制面
+#   - 只:下载 tarball → stop → 替换二进制+脚本+xray binary → 刷 unit(如有改) → start
 #
 # 想做完整重装请改用 install.sh。
 #

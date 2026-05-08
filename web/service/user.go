@@ -87,10 +87,6 @@ func (s *UserService) UpdateUser(id int, username string, password string) error
 		Error; err != nil {
 		return err
 	}
-	// install-info.txt holds the original plaintext snapshot; once the operator
-	// changes credentials it can no longer be reconstructed (bcrypt is one-way),
-	// so dropping it avoids misleading anyone who later reads it.
-	database.RemoveInstallInfo()
 	return nil
 }
 
@@ -119,6 +115,5 @@ func (s *UserService) UpdateFirstUser(username string, password string) error {
 	if err := db.Save(user).Error; err != nil {
 		return err
 	}
-	database.RemoveInstallInfo()
 	return nil
 }

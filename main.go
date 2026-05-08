@@ -59,37 +59,36 @@ func runWebServer() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Sweep an aged install-info.txt before deciding whether first-run
-	// setup needs to print fresh credentials. If the file has lived past
-	// installInfoMaxAge from the previous install it is removed here so
-	// it can't keep showing stale plaintext to anyone with shell access.
-	database.MaybeExpireInstallInfo(config.GetDBPath())
+	// Wipe any leftover install-info.txt from versions ≤ v2.1.2 — that
+	// file is no longer maintained, see database.CleanupLegacyInstallInfo
+	// for the reasoning. Best-effort: failure here just means the stale
+	// file lingers another boot.
+	database.CleanupLegacyInstallInfo(config.GetDBPath())
 	info, frsErr := database.RunFirstRunSetup(config.GetDBPath())
-	// 关键不变性:只要 info.Generated == true,凭据就一定要打印,无论
-	// install-info.txt 写文件成功还是失败 — 否则操作员丢失唯一可见的明文密码,
-	// bcrypt 不可逆,只能整库重置。早期版本在 frsErr != nil 时静默吞掉 banner,
-	// 直接导致 install.sh 报"未生成"且 setting -show 显示 record not found,
-	// 整个首次安装看起来像装失败但其实只是文件写不进去。
+	// 关键不变性:只要 info.Generated == true,凭据就一定要打印 —— 这是
+	// 操作员能看到明文密码的唯一窗口(bcrypt 不可逆)。systemd 把 stdout
+	// 捕获到 journal,install.sh 装完会从 journal grep 出来回显一次给操作员。
+	// 不再写盘了 —— v2.1.2 之前用 install-info.txt 落盘的 plaintext snapshot
+	// 既要 24h auto-expire 又要操作员手动 rm,体感非常糟糕,且容器快照 / 备份
+	// 工具会顺手把它收走,不必要的暴露面。journal 已经是凭据的真理之源,
+	// 没必要再搞一份。
 	if info != nil && info.Generated {
-		savedTo := info.InfoPath
-		if savedTo == "" {
-			savedTo = "(write to disk failed — record this banner NOW)"
-		}
 		fmt.Println("=================================================")
 		fmt.Println("  NexCore x-ui · first-run install info")
+		fmt.Println("  ★ RECORD THIS NOW — only copy lives in journal")
 		fmt.Println("=================================================")
 		fmt.Printf("  panel port: %d\n", info.Port)
 		fmt.Printf("  username:   %s\n", info.Username)
 		fmt.Printf("  password:   %s\n", info.Password)
-		fmt.Printf("  saved to:   %s\n", savedTo)
 		fmt.Println("  → http://<server-ip>:" + fmt.Sprint(info.Port))
+		fmt.Println("=================================================")
+		fmt.Println("  忘记可用: nexcore-x-ui reset  (强制重新生成)")
 		fmt.Println("=================================================")
 	}
 	if frsErr != nil {
-		// Logged AFTER the banner so the credentials are emitted first
-		// even if a downstream sink (journald rate-limit, broken pipe)
-		// truncates output. logger.Warning routes through the same
-		// stdout/journal path as fmt.Println and is preserved by systemd.
+		// Banner already emitted above — log AFTER so the operator's
+		// credentials are flushed to journal first regardless of any
+		// downstream truncation.
 		logger.Warning("first-run setup degraded:", frsErr)
 	}
 
