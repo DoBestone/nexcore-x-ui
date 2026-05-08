@@ -1,12 +1,24 @@
 # NexCore x-ui
 
+[![Latest Release](https://img.shields.io/github/v/release/DoBestone/nexcore-x-ui?display_name=tag&sort=semver&color=2563eb)](https://github.com/DoBestone/nexcore-x-ui/releases/latest)
+[![Release Date](https://img.shields.io/github/release-date/DoBestone/nexcore-x-ui?color=2563eb)](https://github.com/DoBestone/nexcore-x-ui/releases/latest)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](go.mod)
+[![xray-core](https://img.shields.io/badge/xray--core-1.260+-success)](https://github.com/XTLS/Xray-core)
+[![CI](https://img.shields.io/github/actions/workflow/status/DoBestone/nexcore-x-ui/release.yml?branch=main&label=release%20build)](https://github.com/DoBestone/nexcore-x-ui/actions/workflows/release.yml)
+[![Static Binary](https://img.shields.io/badge/binary-static%20linked-success?logo=linux&logoColor=white)](https://github.com/DoBestone/nexcore-x-ui/releases/latest)
+[![Stars](https://img.shields.io/github/stars/DoBestone/nexcore-x-ui?style=social)](https://github.com/DoBestone/nexcore-x-ui/stargazers)
+
 基于 [vaxilu/x-ui](https://github.com/vaxilu/x-ui) 二开的 xray 节点控制面板,以
 **API 优先 + 自动化部署**为目标。适合自部署节点服务器,把它接入业务系统/代理
 调度系统作为受控节点;也适合个人单机部署。
 
-> 与原版的差异:Go 1.24、xray-core 1.260+,密码 bcrypt、Cookie 加固、
-> 默认凭据全随机、systemd hardening、CI 在线编译、面板内一键登录链接、
+> 与原版的差异:Go 1.26、xray-core 1.260+、**纯静态二进制**(无 glibc 依赖)、
+> 密码 bcrypt、Cookie 加固、默认凭据全随机、systemd hardening、
+> **面板内一键在线更新**(走 update.sh + systemd-run,根治端口冲突)、
 > 多 API Token + 调用日志 + 内嵌 API 文档,以及完整的 `/api/v1/*` REST 体系。
+
+📒 **[完整 CHANGELOG](CHANGELOG.md)** · 🔒 **[安全策略](SECURITY.md)** · 🤝 **[贡献指南](CONTRIBUTING.md)** · 📖 **[API 文档](docs/API.md)** · 💬 **[Discussions](https://github.com/DoBestone/nexcore-x-ui/discussions)**
 
 ---
 

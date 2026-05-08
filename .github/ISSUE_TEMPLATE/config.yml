@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 用法 / 部署 / 配置问题
+    url: https://github.com/DoBestone/nexcore-x-ui/discussions
+    about: 不是 bug,是「我不知道怎么配 / 客户端连不上 / 怎么对接业务系统」走 Discussions
+  - name: 🔒 安全漏洞
+    url: https://github.com/DoBestone/nexcore-x-ui/security/advisories/new
+    about: 私下报告漏洞,**别开公开 issue**。详见 SECURITY.md
+  - name: 📖 API 文档
+    url: https://github.com/DoBestone/nexcore-x-ui/blob/main/docs/API.md
+    about: /api/v1/* 全套端点 + curl 示例;面板内「API 控制台」有交互式版本

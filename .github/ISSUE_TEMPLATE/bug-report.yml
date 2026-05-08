@@ -1,0 +1,85 @@
+name: 🐛 Bug 报告
+description: 面板自身有 bug、行为跟文档/期望不一致
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报 bug。**先确认这不是配置问题** — 配置写错走
+        [Discussions](https://github.com/DoBestone/nexcore-x-ui/discussions) 而不是 issue。
+
+        填得越细修得越快,空的字段我们会先关掉等补充。
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本号
+      description: '`nexcore-x-ui -v` 的输出,或面板右上角'
+      placeholder: "2.6.3"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      description: '`cat /etc/os-release | head -2` 的输出 + 架构(amd64/arm64/...)'
+      placeholder: "Ubuntu 22.04 amd64"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 别人对着这步骤一字不差跟着做,能 100% 看到同样问题吗?
+      placeholder: |
+        1. 装 v2.6.3 (`bash <(curl -fsSL .../install.sh) v2.6.3`)
+        2. 登录面板,点「系统更新」
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      placeholder: 应该升级成功并刷新到新版本
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 截图欢迎(直接拖进来),报错文本贴原文
+    validations:
+      required: true
+
+  - type: textarea
+    id: journal
+    attributes:
+      label: systemd journal
+      description: '`journalctl -u nexcore-x-ui -n 80 --no-pager` 的输出'
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其他信息
+      description: 反代 (nginx / CF) 拓扑、有无修改默认 xray template、相关 issue 号等
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Pre-flight
+      options:
+        - label: 我已经搜过 [现有 issues](https://github.com/DoBestone/nexcore-x-ui/issues?q=) 没找到重复
+          required: true
+        - label: 我已经升到 v2.6.x 最新版试过 (老版本已知 bug 大概率上面修了)
+          required: true
