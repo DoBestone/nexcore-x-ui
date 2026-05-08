@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -151,42 +152,66 @@ func (s *UpdateService) CheckLatest() (*UpdateCheck, error) {
 	return out, nil
 }
 
-// ApplyLatest downloads the asset matching the running architecture, swaps
-// the binary in place, and re-execs into the new binary. Returns the new
-// version on success. The replace-and-restart sequence is:
+// ApplyLatest 把升级动作派给已经在生产证明过的 update.sh 脚本执行 —
+// Go 层只负责"拽脚本下来 + 用 systemd-run 在独立 cgroup 里把脚本启起
+// 来",剩下的下载 / SHA256 / 解压 / 文件替换 / systemctl stop+start 全
+// 部交还给脚本。
 //
-//  1. download tarball to /tmp
-//  2. verify SHA256 against checksums.txt
-//  3. extract to /tmp/x-ui-update-<ts>/
-//  4. rename current binary to <path>.old
-//  5. install new binary atomically
-//  6. syscall.Exec(newBinary) → process image is replaced in-place
+// 这条路径**取代了**之前 v2.5.x ~ v2.6.2 在 Go 层 inline 实现的:
+// 「下载 tarball → SHA256 → tar 解压 → 备份旧二进制 → 替换 → syscall.Exec」
+// 的一整套手写 ~200 行逻辑。改架构的动机:
 //
-// 关键修复(v2.5.x):此前 step 6 只发了 SIGHUP,main.go 的 SIGHUP handler
-// 会重建一个 web.Server 重新 Start,但 **运行的还是旧 Go 进程**。也就是说
-// 文件已经换了,内存里跑的代码没换 — 用户看到「升级成功」但版本号没变。
-// 现在改为 syscall.Exec 把整个进程映像替换成新二进制,PID 不变,systemd
-// MAINPID 跟踪不动,新的 main() 冷启动加载新代码。
+//   - 升级路径**收敛到一条**:install.sh / 操作员手动 / 面板按钮 现在
+//     全用同一份 update.sh。免去 "Go 层重新实现的逻辑跟脚本漂移" 的风险
+//     —— 这正是 v2.6.0 漏掉 xray 子进程清理(后来 v2.6.2 补)的根因。
+//   - **systemd 帮我们处理 cgroup teardown**:transient service 在它自己
+//     的 cgroup 里跑,update.sh 调 `systemctl stop nexcore-x-ui` 把当前
+//     panel 进程 SIGTERM,KillMode=control-group 默认顺手把 xray 子进程
+//     一起干掉。换二进制以后 `systemctl start` 拉起来全新进程 + 全新 xray,
+//     端口已经空着,啥都不会撞。
+//   - **更新逻辑可以独立迭代**:update.sh 改完推 main 分支立刻生效,不
+//     需要等下一次 panel 编译发版。
 //
-// Failure between steps 4 and 5 falls back to <path>.old so we never end
-// up with no binary at all.
+// 关键参数(systemd-run):
+//
+//   --unit=nexcore-x-ui-updater-<ts>  唯一名,避免连点造成 unit 冲突
+//   --collect                         transient unit 退出后自动清理
+//   --no-block                        systemd-run 立刻返回,不等脚本跑完
+//   service mode (默认,非 --scope)   关键!scope 在调用方 cgroup 内开
+//                                     新子组,我们被 stop 时它跟着死;
+//                                     service 模式作为 systemd pid 1 的
+//                                     子进程,完全独立 cgroup。
 func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) {
 	// 互斥:同一时刻只允许一次升级。两个浏览器同时点"立即更新"不会
 	// 半路打架(后到的会拿不到锁直接报错给用户)。
 	if !s.applyMu.TryLock() {
 		return nil, errors.New("update: 已有升级正在进行中")
 	}
-	defer s.applyMu.Unlock()
+	// **不要** defer Unlock — 调度成功后几秒内 systemctl stop 会把当前
+	// 进程 SIGTERM,锁随进程消失。这里只在错误路径上手动 Unlock,成功
+	// 路径让进程死掉就行。defer 会让"调度失败"分支正确释放锁,但同时也
+	// 让"调度成功 → 等被 kill"的窗口里别的请求误以为可以再调一次,因为
+	// goroutine return 走 defer 立刻 Unlock,reentrancy 风险。
+	unlocked := false
+	unlock := func() {
+		if !unlocked {
+			s.applyMu.Unlock()
+			unlocked = true
+		}
+	}
 
 	s.setProgress(ApplyProgress{
 		State:      ApplyStateDownloading,
-		Message:    "正在解析 release 信息…",
+		Message:    "查询 release 元数据…",
 		TargetTag:  targetVersion,
 		StartedAt:  time.Now().Unix(),
 		UpdatedAt:  time.Now().Unix(),
 		CurrentVer: config.GetVersion(),
 	})
 
+	// 先做 sanity:拉一下 release 元数据确认目标 tag 真存在。比起把无效
+	// 版本号一路传给脚本然后让脚本下载 404,这里 fail-fast 一句给用户更
+	// 直接的错误。
 	owner, repo := repoCoordinates()
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 	if targetVersion != "" {
@@ -194,166 +219,61 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 	}
 	r, err := s.fetchRelease(url)
 	if err != nil {
+		unlock()
 		s.failProgress("查询 release 失败:" + err.Error())
 		return nil, err
 	}
 
-	assetURL, assetName := s.pickAsset(r)
-	if assetURL == "" {
-		err := fmt.Errorf("no asset for arch %s in release %s", runtime.GOARCH, r.TagName)
-		s.failProgress(err.Error())
-		return nil, err
-	}
-
-	s.touchProgress(ApplyStateDownloading, fmt.Sprintf("下载 %s …", assetName), r.TagName)
-
-	// Download.
-	tmpDir, err := os.MkdirTemp("", "x-ui-update-*")
-	if err != nil {
-		s.failProgress(err.Error())
-		return nil, err
-	}
-	tarballPath := filepath.Join(tmpDir, "x-ui.tar.gz")
-	if err := downloadFile(assetURL, tarballPath); err != nil {
-		s.failProgress("下载失败:" + err.Error())
-		return nil, fmt.Errorf("download: %w", err)
-	}
-
-	// Verify SHA256 against checksums.txt published in the same release.
-	// We fail closed: any error here aborts the upgrade with the new
-	// binary never installed. checksums.txt is mandatory — a release
-	// missing it is treated as untrusted.
-	s.touchProgress(ApplyStateVerifying, "校验 SHA256…", r.TagName)
-	if err := verifyTarballChecksum(r, assetName, tarballPath); err != nil {
-		s.failProgress("校验失败:" + err.Error())
-		return nil, fmt.Errorf("verify: %w", err)
-	}
-
-	// Extract.
-	s.touchProgress(ApplyStateExtracting, "解压压缩包…", r.TagName)
-	extractedRoot := filepath.Join(tmpDir, "extracted")
-	if err := os.MkdirAll(extractedRoot, 0o755); err != nil {
-		s.failProgress(err.Error())
-		return nil, err
-	}
-	if err := extractTarGz(tarballPath, extractedRoot); err != nil {
-		s.failProgress("解压失败:" + err.Error())
-		return nil, fmt.Errorf("extract: %w", err)
-	}
-
-	// The expected layout is `nexcore-x-ui/...` inside the tarball produced
-	// by .github/workflows/release.yml. Fall back to the legacy `x-ui/`
-	// directory or the archive root for any forks that ship differently.
-	srcDir := filepath.Join(extractedRoot, "nexcore-x-ui")
-	if _, err := os.Stat(srcDir); err != nil {
-		legacy := filepath.Join(extractedRoot, "x-ui")
-		if _, err2 := os.Stat(legacy); err2 == nil {
-			srcDir = legacy
-		} else {
-			srcDir = extractedRoot
-		}
-	}
-
-	// Locate the running binary so we know where to install the new one.
-	s.touchProgress(ApplyStateInstalling, "替换面板二进制…", r.TagName)
+	// 把 update.sh 拽到 install dir 下(systemd unit 的 ReadWritePaths 之一)。
+	// **不要写 /tmp** —— PrivateTmp=true 让我们的 /tmp 跟 systemd-run
+	// transient service 看到的是隔离 namespace,写到 /tmp 那边读不到。
 	exe, err := os.Executable()
 	if err != nil {
-		s.failProgress(err.Error())
+		unlock()
+		s.failProgress("locate self: " + err.Error())
 		return nil, fmt.Errorf("locate self: %w", err)
 	}
 	installRoot := filepath.Dir(exe)
+	scriptPath := filepath.Join(installRoot, ".update-dispatch.sh")
 
-	// Atomic swap: rename existing binary to .old, install new. The binary
-	// name inside the tarball matches the running executable's basename
-	// (nexcore-x-ui) — falling back to legacy "x-ui" only for old archives.
-	exeBase := filepath.Base(exe)
-	binSrc := filepath.Join(srcDir, exeBase)
-	if _, err := os.Stat(binSrc); err != nil {
-		if alt := filepath.Join(srcDir, "x-ui"); fileExists(alt) {
-			binSrc = alt
-		}
+	scriptURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/main/update.sh", owner, repo)
+	s.touchProgress(ApplyStateDownloading, "下载 update.sh …", r.TagName)
+	if err := downloadFile(scriptURL, scriptPath); err != nil {
+		unlock()
+		s.failProgress("下载 update.sh 失败:" + err.Error())
+		return nil, fmt.Errorf("download update.sh: %w", err)
 	}
-	binDst := exe
-	binBackup := exe + ".old"
-	if _, err := os.Stat(binSrc); err != nil {
-		s.failProgress("压缩包缺少新二进制")
-		return nil, fmt.Errorf("new binary missing in tarball: %w", err)
-	}
-	_ = os.Remove(binBackup)
-	if err := os.Rename(binDst, binBackup); err != nil {
-		s.failProgress("备份当前二进制失败:" + err.Error())
-		return nil, fmt.Errorf("backup current binary: %w", err)
-	}
-	if err := copyFile(binSrc, binDst, 0o755); err != nil {
-		// rollback
-		_ = os.Rename(binBackup, binDst)
-		s.failProgress("安装新二进制失败:" + err.Error())
-		return nil, fmt.Errorf("install new binary: %w", err)
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
+		unlock()
+		s.failProgress("chmod update.sh 失败:" + err.Error())
+		return nil, fmt.Errorf("chmod: %w", err)
 	}
 
-	// Best-effort: refresh xray binary + scripts. Do not abort on failure
-	// because the main panel binary swap already succeeded.
-	scripts := []string{"bin", exeBase + ".sh", exeBase + ".service"}
-	for _, sub := range scripts {
-		src := filepath.Join(srcDir, sub)
-		if !fileExists(src) {
-			// Legacy fallbacks for forks shipping x-ui.* names.
-			if sub == exeBase+".sh" {
-				src = filepath.Join(srcDir, "x-ui.sh")
-			} else if sub == exeBase+".service" {
-				src = filepath.Join(srcDir, "x-ui.service")
-			}
-		}
-		_ = copyTree(src, filepath.Join(installRoot, sub))
+	// 调度 transient service。args[0] 是 systemd-run 自己的 flag,后面跟
+	// 真正要跑的命令(bash + 脚本路径 + 可选 target 参数)。
+	args := []string{
+		fmt.Sprintf("--unit=nexcore-x-ui-updater-%d", time.Now().Unix()),
+		"--description=nexcore-x-ui in-panel updater",
+		"--quiet",
+		"--collect",
+		"--no-block",
+		"bash", scriptPath,
+	}
+	if r.TagName != "" {
+		args = append(args, r.TagName)
+	}
+	s.touchProgress(ApplyStateRestarting, "已交给后台 update.sh,面板即将重启…", r.TagName)
+	if err := exec.Command("systemd-run", args...).Run(); err != nil {
+		unlock()
+		s.failProgress("调度 systemd-run 失败:" + err.Error())
+		logger.Warning("update: systemd-run dispatch failed:", err)
+		return nil, fmt.Errorf("dispatch: %w", err)
 	}
 
-	// CI runner builds the tarball as uid 1001; tar / copyTree preserve that.
-	// xray.preflightBinary refuses to launch any binary not owned by root,
-	// which would loop "restart xray failed: ... owned by uid 1001 ..."
-	// every 30s. chown the whole install root to root after the swap so
-	// preflight passes on next reload. Best-effort — running as root is
-	// the only configuration where chown succeeds; non-root setups won't
-	// hit preflight anyway.
-	_ = chownRecursiveRoot(installRoot)
-
-	// Remove the .old backup; we trust the new binary now.
-	_ = os.Remove(binBackup)
-	_ = os.RemoveAll(tmpDir)
-
-	// Trigger re-exec — see ApplyLatest doc for why this replaces the old
-	// SIGHUP path. 800ms gives the HTTP response time to flush to the
-	// caller before the listening socket goes away.
-	//
-	// 关键:必须先把 xray 子进程 SIGTERM 掉再 exec。xray 是 panel 的子进程,
-	// kernel 在 execve 时不会终结子进程 — 不显式 stop 的话,exec 之后老
-	// xray 还活着占着 inbound 端口,新 panel main() 启动时再去 spawn xray
-	// 直接 EADDRINUSE,UI 看到的就是「xray 报错 + 版本没变」(因为 panel
-	// 自己倒是新二进制,但 xray 起不来用户感知就是更新失败)。这是 v2.6.0
-	// 在线更新在生产环境第一次实战暴露的 bug,补在 v2.6.2。
-	s.touchProgress(ApplyStateRestarting, "升级完成,正在重启面板…", r.TagName)
-	go func() {
-		time.Sleep(800 * time.Millisecond)
-
-		// XrayService 是无状态零值结构 — 内部走包级 var p *xray.Process
-		// 拿到当前运行的 xray handle。Stop() 内置 SIGTERM + 5s grace +
-		// SIGKILL fallback,返回时 xray 进程已 reap,端口已释放。
-		// "xray is not running" 是预期的良性错误(更新前用户已手动停了
-		// xray),其它错误也只能 best-effort 继续 — exec 推进比卡住强。
-		xs := XrayService{}
-		if err := xs.StopXray(); err != nil && !strings.Contains(err.Error(), "not running") {
-			logger.Warning("update: stop xray before re-exec failed:", err)
-		}
-
-		if err := reexecSelf(); err != nil {
-			// 兜底:syscall.Exec 几乎不会失败(失败往往是新二进制不可执行
-			// /被 SELinux 拦了)。先把状态打成 error,再 fallback 到 SIGHUP
-			// 让旧版面板继续跑 — 至少 UI 不死。
-			logger.Warning("update: re-exec into new binary failed:", err)
-			s.failProgress("重启失败:" + err.Error() + "(请用 systemctl restart " + filepath.Base(exe) + " 手动重启)")
-			_ = sendSelfSIGHUP()
-		}
-	}()
-
+	// 调度成功 — 锁不释放,等 systemctl stop 把整个进程收掉。从用户视角:
+	// HTTP 响应即将发出 → 几秒后面板断连 → 前端轮询 progress 收到 connect
+	// refused → 当成"已重启"提示刷新 → 新二进制接住请求。
+	logger.Info("update: dispatched update.sh via systemd-run for", r.TagName)
 	return &UpdateCheck{
 		Current:         config.GetVersion(),
 		Latest:          r.TagName,
