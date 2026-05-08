@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"nexcore-x-ui/database/model"
@@ -77,9 +78,16 @@ type BindResult struct {
 }
 
 // DomainBindingService 是无状态的;对外暴露的方法都接 ctx + 输入,返回报告。
+//
+// 唯一的可变状态是 inflight — per-domain 互斥,防止用户连点两次"开始绑定"
+// 触发两路 acme.sh 同时跑(同一域名 5 次/小时撞 LE rate limit,事故是
+// 真实的)。前端 button-loading 防得住正常用户,但 API 端点被 curl 直接
+// 打就漏了,所以放后端兜底。锁粒度 = domain;不同域名互不阻塞。
 type DomainBindingService struct {
 	settingService SettingService
 	inboundService InboundService
+
+	inflight sync.Map // domain(string) -> struct{}
 }
 
 // DetectEnvironment 跑所有预检。10s 超时 — 子进程 spawn 慢但不会无限阻塞。
@@ -216,6 +224,7 @@ func (s *DomainBindingService) BindDomain(req *BindRequest) *BindResult {
 	logf("validate", "开始")
 	req.Domain = strings.TrimSpace(strings.ToLower(req.Domain))
 	req.Email = strings.TrimSpace(req.Email)
+	req.CfApiToken = strings.TrimSpace(req.CfApiToken)
 	if !validDomain(req.Domain) {
 		return fail("validate", errors.New("域名格式不合法"))
 	}
@@ -228,6 +237,14 @@ func (s *DomainBindingService) BindDomain(req *BindRequest) *BindResult {
 	if req.AcmeMode == "dns01-cf" && req.CfApiToken == "" {
 		return fail("validate", errors.New("DNS-01 模式必须提供 CF API token"))
 	}
+
+	// Step 1.1: per-domain 互斥锁。LoadOrStore 返回 loaded=true 表示别的
+	// goroutine 已经在跑同一域名 — 直接拒绝,不要排队等(LE 限流是按窗口
+	// 计的,排队等没意义,反而让用户体验"为什么点了几次都没响应")。
+	if _, loaded := s.inflight.LoadOrStore(req.Domain, struct{}{}); loaded {
+		return fail("validate", errors.New("该域名正在绑定中,请等当前流程跑完(约 1-3 分钟)"))
+	}
+	defer s.inflight.Delete(req.Domain)
 
 	// Step 1.5: 必须 root + nginx 已装
 	env := s.DetectEnvironment()
@@ -276,7 +293,10 @@ func (s *DomainBindingService) BindDomain(req *BindRequest) *BindResult {
 
 	// Step 4: 创建 xray 入站
 	wsPath := "/" + randomHex(16)
-	xrayPort := pickRandomLoopbackPort()
+	xrayPort, err := pickRandomLoopbackPort()
+	if err != nil {
+		return fail("xray", err)
+	}
 	uuid := newUUID()
 	clientEmail := "user-" + randomHex(3)
 	logf("xray", fmt.Sprintf("创建 VLESS+WS 入站 127.0.0.1:%d path=%s", xrayPort, wsPath))
@@ -321,6 +341,19 @@ func (s *DomainBindingService) BindDomain(req *BindRequest) *BindResult {
 		logf("settings", "warning: 写 nodeAddress 失败 — "+err.Error())
 	} else {
 		logf("settings", "已设置节点地址 = "+req.Domain)
+	}
+
+	// Step 7.5: DNS-01 模式下顺便把 CF API token 写到 settings(加密存)。
+	// 这样后续"一键切换橙云/灰云"卡片就不需要再让用户去面板设置重填一次。
+	// 仅 dns01-cf 模式需要 — http01 模式根本没接收 token。
+	// 已经填过 settings 的用户也不会被覆盖成同样值时丢失什么(saveSetting
+	// 会重新加密),失败也只 warn,不阻塞绑定结果。
+	if req.AcmeMode == "dns01-cf" && req.CfApiToken != "" {
+		if err := s.settingService.saveSetting("cfApiToken", req.CfApiToken); err != nil {
+			logf("settings", "warning: 写 cfApiToken 失败 — "+err.Error())
+		} else {
+			logf("settings", "CF API token 已加密存入面板设置(后续切换橙云/灰云可直接用)")
+		}
 	}
 
 	// Step 8: 完成
@@ -380,11 +413,12 @@ func newUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
-// pickRandomLoopbackPort 在 30000-50000 范围找一个不被占用的本机端口给
-// xray 内网入站用。撞了概率极低,撞了后端口约束自然报错。
-func pickRandomLoopbackPort() int {
+// pickRandomLoopbackPort 让内核分配一个空闲的回环端口给 xray 内网入站
+// 用。20 次失败基本意味着 fd 表满 / 内核拒绝 listen,这个 host 根本不在
+// 工作状态,继续往下跑也无意义 — 直接 error 让上层报错回滚,不要瞎兜底
+// 一个 30000+random 端口(那个端口大概率也起不来,只会让后续诊断更难)。
+func pickRandomLoopbackPort() (int, error) {
 	for try := 0; try < 20; try++ {
-		// 用 net.Listen 拿一个真空闲端口然后立刻关掉
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			continue
@@ -392,10 +426,10 @@ func pickRandomLoopbackPort() int {
 		port := l.Addr().(*net.TCPAddr).Port
 		_ = l.Close()
 		if port >= 1024 && port <= 65535 {
-			return port
+			return port, nil
 		}
 	}
-	return 30000 + int(time.Now().UnixNano()%20000)
+	return 0, errors.New("内核无法分配回环端口(fd 表满 / iptables 拦截?)")
 }
 
 func buildVlessWSInbound(port int, wsPath, uuid, email, sniHint string) *model.Inbound {
@@ -569,6 +603,16 @@ func installAcmeSh(email string) error {
 // 用 Let's Encrypt 服务器(--server letsencrypt)。证书签发后用 --install-cert
 // 把 cert/key 拷到固定路径(/etc/nginx/certs/<domain>/),后续续费 acme.sh
 // 的 cron 自动续费 + 复制 + reload nginx。
+//
+// env 安全:不传 os.Environ() 整套面板进程环境变量(里面有
+// NEXCORE_TRUSTED_PROXIES、可能的 PROXY_* 等),只白名单几条 acme.sh
+// 真正需要的(PATH/HOME/SHELL),避免 acme.sh / curl 子进程拿到不该拿
+// 的变量。SUDO_/USER 之类如果不在白名单内,acme.sh 也照常工作。
+//
+// 输出 redact:即便 acme.sh 当前版本不会把 CF_Token 回显到 stdout,
+// 升级后或 set -x debug 模式可能改变行为。出口前统一用真实 token 做
+// 字符串替换 — 任何包含明文的行直接打码,断绝从前端 Logs 卡里抓 token
+// 的路径。
 func acquireCert(acmePath, domain, email, mode, cfToken string) (string, string, error) {
 	if acmePath == "" {
 		return "", "", errors.New("acme.sh 未安装")
@@ -581,13 +625,13 @@ func acquireCert(acmePath, domain, email, mode, cfToken string) (string, string,
 	keyPath := filepath.Join(certDir, "privkey.pem")
 
 	args := []string{"--issue", "-d", domain, "--server", "letsencrypt"}
-	env := os.Environ()
+	cmdEnv := minimalSubprocessEnv()
 	switch mode {
 	case "http01":
 		args = append(args, "--standalone")
 	case "dns01-cf":
 		args = append(args, "--dns", "dns_cf")
-		env = append(env, "CF_Token="+cfToken)
+		cmdEnv = append(cmdEnv, "CF_Token="+cfToken)
 	default:
 		return "", "", errors.New("未知 acmeMode: " + mode)
 	}
@@ -595,10 +639,10 @@ func acquireCert(acmePath, domain, email, mode, cfToken string) (string, string,
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, acmePath, args...)
-	cmd.Env = env
+	cmd.Env = cmdEnv
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", "", fmt.Errorf("acme.sh issue: %w\n%s", err, string(out))
+		return "", "", fmt.Errorf("acme.sh issue: %w\n%s", err, redactToken(string(out), cfToken))
 	}
 
 	// 安装到固定路径
@@ -609,7 +653,40 @@ func acquireCert(acmePath, domain, email, mode, cfToken string) (string, string,
 		"--reloadcmd", "systemctl reload nginx",
 	}
 	if out, err := runCmd(30*time.Second, acmePath, installArgs...); err != nil {
-		return "", "", fmt.Errorf("acme.sh install-cert: %w\n%s", err, string(out))
+		return "", "", fmt.Errorf("acme.sh install-cert: %w\n%s", err, redactToken(string(out), cfToken))
 	}
 	return certPath, keyPath, nil
+}
+
+// minimalSubprocessEnv 返回 acme.sh / curl 子进程能跑起来的最小环境
+// 变量集。只挑必需的 PATH(找 openssl / curl / nginx)、HOME(acme.sh
+// 默认装到 ~/.acme.sh)、SHELL(acme.sh 内部 shell exec)、LANG/LC_ALL
+// (避免编码问题导致 cert 里出乱码)。
+//
+// 故意不继承 NEXCORE_* / PROXY_* / 任何用户自定义变量 — 子进程不需要,
+// 也不应该看到。
+func minimalSubprocessEnv() []string {
+	keep := []string{"PATH", "HOME", "SHELL", "LANG", "LC_ALL"}
+	out := make([]string, 0, len(keep))
+	for _, k := range keep {
+		if v, ok := os.LookupEnv(k); ok {
+			out = append(out, k+"="+v)
+		}
+	}
+	if len(out) == 0 {
+		// 极端情况下面板进程没有 PATH(systemd unit 没有 Environment=PATH),
+		// 给一个常见 PATH 兜底,免得 acme.sh 找不到 curl / openssl。
+		out = append(out, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+	}
+	return out
+}
+
+// redactToken 把字符串里出现的 token 全替换成 ***。token 为空字符串时
+// 直接返回原字符串(http-01 模式 cfToken 是空,strings.ReplaceAll 空
+// 串会无限替换,所以必须前置判断)。
+func redactToken(s, token string) string {
+	if token == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, token, "***")
 }

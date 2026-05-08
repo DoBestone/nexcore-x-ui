@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"nexcore-x-ui/logger"
 )
 
 const cfBaseURL = "https://api.cloudflare.com/client/v4"
@@ -57,8 +59,11 @@ type CFRecordState struct {
 //   3) 在 zone 里查 /dns_records?name=domain,挑一条 A/AAAA/CNAME
 func (s *CloudflareService) GetRecordState(domain string) (*CFRecordState, error) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
-	if domain == "" {
-		return nil, errors.New("域名不能为空")
+	if !validDomain(domain) {
+		// validDomain 对空串、超长、含非法字符都拒。提前打回去 — 否则
+		// 攻击者(已登录 panel)能拿超长 / 注入字符 domain 浪费 CF token
+		// 配额 / 触发 CF API 慢响应。
+		return nil, errors.New("域名格式不合法(只允许小写字母/数字/`.`/`-`,3-253 字符)")
 	}
 	token := s.settingService.GetCfApiToken()
 	if token == "" {
@@ -119,6 +124,11 @@ func (s *CloudflareService) SetProxied(domain string, proxied bool) (*CFRecordSt
 		// no-op，不发 PATCH 浪费
 		return cur, nil
 	}
+	// 审计:DNS 代理状态翻转有副作用(橙云 → 灰云会立刻暴露 origin IP,
+	// 反向也会切断走 CF 的客户端连接),记一行让 ops 事后能回看是谁 / 何时
+	// 改的。token 不打印。
+	logger.Infof("cf SetProxied: domain=%s zone=%s record=%s %v -> %v",
+		cur.Domain, cur.ZoneName, cur.RecordID, cur.Proxied, proxied)
 	token := s.settingService.GetCfApiToken()
 	body, _ := json.Marshal(map[string]interface{}{"proxied": proxied})
 	var pr struct {

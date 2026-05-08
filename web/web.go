@@ -7,10 +7,13 @@ import (
 	"embed"
 	"io"
 	"io/fs"
+	"mime"
 	"net"
 	"net/http"
 	neturl "net/url"
 	"os"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -401,6 +404,19 @@ func (f *spaSubFS) Open(name string) (fs.File, error) {
 	return &wrapAssetsFile{File: file}, nil
 }
 
+// ReadDir / ReadFile 实现 fs.ReadDirFS / fs.ReadFileFS 接口。没这俩方法
+// fs.WalkDir 在 prod 路径上 readdir 直接报 "not implemented" — wrapAssetsFile
+// 只 embed fs.File(没 ReadDir),WalkDir 又不会 fallback 到 Open+读字节
+// 自己解析。代理给 root,root 是 fs.Sub(embed.FS, "frontend/dist") 返回
+// 的 subFS,自带 ReadDirFS / ReadFileFS。
+func (f *spaSubFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	return fs.ReadDir(f.root, name)
+}
+
+func (f *spaSubFS) ReadFile(name string) ([]byte, error) {
+	return fs.ReadFile(f.root, name)
+}
+
 type wrapAssetsFile struct {
 	fs.File
 }
@@ -421,6 +437,69 @@ type wrapAssetsFileInfo struct {
 
 func (f *wrapAssetsFileInfo) ModTime() time.Time {
 	return startTime
+}
+
+// spaAssetsCache 把 dist/assets 下所有静态资源一次性读入内存,对
+// 文本类(.js / .css / .map)做 `/__NX_BASE__/` → basePath 替换,其它
+// 类型(图片 / 字体)原封缓存。启动时构造一次即可 — basePath 在面板
+// 进程生命周期内不变(改 settings → 重启面板生效)。
+//
+// 资源总量上不大(典型 SPA dist/assets ≈ 1-2MB),全量驻留比按需替换
+// 简单:不用 sync.Once / per-request 字符串拼接,出口直接写 c.Data。
+// gzip middleware 在外层照常工作 —— 它看的是 Content-Type,不依赖
+// 我们这里给的 body 形态。
+type spaAssetsCache struct {
+	files map[string]spaAssetEntry
+}
+
+type spaAssetEntry struct {
+	contentType string
+	body        []byte
+}
+
+func (c *spaAssetsCache) get(p string) (spaAssetEntry, bool) {
+	e, ok := c.files[p]
+	return e, ok
+}
+
+func buildSPAAssetsCache(distRoot fs.FS, basePath string) (*spaAssetsCache, error) {
+	cache := &spaAssetsCache{files: map[string]spaAssetEntry{}}
+	assetsSub, err := fs.Sub(distRoot, "assets")
+	if err != nil {
+		return nil, err
+	}
+	err = fs.WalkDir(assetsSub, ".", func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		body, err := fs.ReadFile(assetsSub, p)
+		if err != nil {
+			return err
+		}
+		// token 替换:只对文本类型做,二进制(图片 / 字体)原样保留。
+		// .map 是 sourcemap,内部 sources 数组带 base 路径(虽然 build
+		// 时关了 sourcemap,future-proof 一下也不亏)。
+		ext := filepath.Ext(p)
+		switch ext {
+		case ".js", ".mjs", ".css", ".map", ".svg":
+			body = []byte(strings.ReplaceAll(string(body), "/__NX_BASE__/", basePath))
+		}
+		ct := mime.TypeByExtension(ext)
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		// 用 forward slash 作 cache key — fs.WalkDir 在 Linux/macOS 上
+		// 已经是 `/` 分隔。Windows 不是目标平台。
+		cache.files[path.Clean(p)] = spaAssetEntry{contentType: ct, body: body}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return cache, nil
 }
 
 type Server struct {
@@ -582,11 +661,50 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 		}
 		distRoot = sub
 	}
-	assetsSub, err := fs.Sub(distRoot, "assets")
+	// SPA 资源服务 — 不直接 StaticFS,而是启动时一次性把 dist/assets 读
+	// 进内存做 token 替换 + cache,然后用一条 GET handler serve。
+	//
+	// 为什么不 StaticFS 加 middleware:
+	//   Vite 把 base path 烧进主 entry bundle 的 __vitePreload 函数
+	//   (return "/__NX_BASE__/" + dep),这是动态 import chunk 的根源
+	//   token。基础路径在面板启动时由 webBasePath + 安全入口 slug 拼成,
+	//   只能在运行期决定 — Vite 编译期不知道。所以必须服务侧改写 .js
+	//   出口字节流。StaticFS 用的是 http.FileServer,内部 io.Copy 没有
+	//   middleware 可插入位置;手写 handler 反而更简单。
+	//
+	//   replace target: "/__NX_BASE__/" → basePath。token 故意带前后斜杠,
+	//   不会污染 JS 里 window.__NX_BASE__ 这个标识符(读自注入的
+	//   <script>window.__NX_BASE__ = "%%NX_BASE%%";</script> 占位,不带斜杠)。
+	//
+	// dev / prod 行为一致:dev 模式 distRoot 是 os.DirFS("web/frontend/dist"),
+	// 改 dist/ 后要重启面板进程才能拿到新 cache。普通 dev 流程是 vite
+	// 自己的 :5173 dev server + Go 后端 :54321,不会走这条路径。
+	assetsCache, err := buildSPAAssetsCache(distRoot, basePath)
 	if err != nil {
 		return nil, err
 	}
-	engine.StaticFS(basePath+"assets", http.FS(assetsSub))
+	assetsURL := basePath + "assets/*filepath"
+	engine.GET(assetsURL, func(c *gin.Context) {
+		p := strings.TrimPrefix(c.Param("filepath"), "/")
+		e, ok := assetsCache.get(p)
+		if !ok {
+			c.String(http.StatusNotFound, "not found")
+			return
+		}
+		c.Data(http.StatusOK, e.contentType, e.body)
+	})
+	// HEAD 与 GET 同等待遇 — 浏览器有时 preflight,代理也偶尔做 HEAD
+	// 探活。空 body 由 gin 自己处理。
+	engine.HEAD(assetsURL, func(c *gin.Context) {
+		p := strings.TrimPrefix(c.Param("filepath"), "/")
+		e, ok := assetsCache.get(p)
+		if !ok {
+			c.String(http.StatusNotFound, "not found")
+			return
+		}
+		c.Header("Content-Type", e.contentType)
+		c.Status(http.StatusOK)
+	})
 
 	// SPA 入口:base path 根 GET → index.html。SPA 用 createWebHistory,
 	// 任何匹配不到 API/asset 的 GET 都通过 noRoute 兜底回这里,客户端 vue-router 接管。
@@ -623,15 +741,14 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 		// 也替换成 basePath,生成 window./ = "/" 这种破 JS 语法 → 全站
 		// SyntaxError。占位符必须跟变量名分离。
 		injected := strings.ReplaceAll(string(data), "%%NX_BASE%%", safeBase)
-		// Vite 编译产物把 asset 路径写死成绝对路径(`/assets/foo.js`),
-		// 安全入口启用后 basePath 变成 `/<slug>/`,这些绝对路径绕开 slug
-		// 直接打到 root → NoRoute 一律 404。这里在 HTML 出门前把 src/href
-		// 的 `/assets/` 前缀替换成 `<basePath>assets/`。basePath 已经
-		// trailing `/`,所以拼出来仍然只一个斜杠。basePath = `/`(即未启用
-		// 安全入口)时替换是 no-op,跟旧行为一致。
-		if basePath != "/" {
-			injected = strings.ReplaceAll(injected, `="/assets/`, `="`+basePath+`assets/`)
-		}
+		// Vite 把 base 写成 token `/__NX_BASE__/`,所有 link/script 的 src
+		// 都形如 `/__NX_BASE__/assets/foo.js`。这里把 token 替换成真实
+		// basePath。basePath 总是 trailing `/`,token 也带前后 `/`,替换
+		// 后 `/` 仍只一个。basePath = `/` 时把 `/__NX_BASE__/` 收成
+		// `/`,跟未启用安全入口的旧形态一致。JS 入口 bundle 里
+		// __vitePreload 函数体里的同一 token 由 buildSPAAssetsCache 统一
+		// 处理 — 这里只管 HTML。
+		injected = strings.ReplaceAll(injected, "/__NX_BASE__/", basePath)
 		c.Header("Cache-Control", "no-cache")
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(injected))
 	}

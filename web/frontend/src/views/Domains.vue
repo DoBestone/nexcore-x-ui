@@ -8,7 +8,7 @@
 //   2. 用户填表 → POST /xui/domain/bind → 后端跑 1-3 分钟(取证书最慢)
 //   3. 完成弹分享链接 + 二维码 + 完整 xray 配置预览
 import { onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Lock } from '@element-plus/icons-vue'
 import { post, get } from '@/api/http'
 
@@ -125,6 +125,40 @@ async function cfRefresh() {
       (e as { response?: { data?: { msg?: string } } })?.response?.data?.msg || '查询失败'
   } finally {
     cfLoading.value = false
+  }
+}
+
+// 解绑 — 删 nginx 配置 + reload。xray 入站不动(里面可能还有客户),
+// 让用户决定要不要删。二次确认必须的:误点会立刻断掉 CF 边缘 → nginx
+// 这条转发链,所有走该域名的客户端瞬间掉线。
+const unbinding = ref(false)
+async function doUnbind() {
+  if (!result.value?.domain) return
+  const domain = result.value.domain
+  try {
+    await ElMessageBox.confirm(
+      `确认解绑域名 ${domain}?会删除 /etc/nginx/conf.d/nx-${domain}.conf 并 reload nginx,
+所有走该域名的客户端会立刻断开。xray 入站不会被删,你想清掉它得去入站列表手动删。`,
+      '解绑域名',
+      {
+        type: 'warning',
+        confirmButtonText: '解绑',
+        cancelButtonText: '取消'
+      }
+    )
+  } catch {
+    return
+  }
+  unbinding.value = true
+  try {
+    await post('xui/domain/unbind', { domain })
+    ElMessage.success(`已解绑 ${domain}(nginx 已 reload,xray 入站需手动清理)`)
+    result.value = null
+  } catch (e: unknown) {
+    const msg = (e as { response?: { data?: { msg?: string } } })?.response?.data?.msg || '解绑失败'
+    ElMessage.error(msg)
+  } finally {
+    unbinding.value = false
   }
 }
 
@@ -262,7 +296,8 @@ onMounted(detect)
             placeholder="Zone:DNS:Edit 权限,在 CF Dashboard → My Profile → API Tokens 创建"
           />
           <span class="nx-muted" style="font-size: 12px">
-            不会落盘到面板设置,仅作为环境变量传给 acme.sh 子进程。CF 橙云下也能正常验证。
+            绑定成功后会自动加密保存到面板设置(供后续切换橙云/灰云复用)。
+            申请证书时只作为环境变量传给 acme.sh 子进程,不写明文 / 不入日志。
           </span>
         </el-form-item>
         <el-alert
@@ -362,11 +397,21 @@ onMounted(detect)
     <!-- 结果 -->
     <el-card v-if="result" style="margin-top: 16px">
       <template #header>
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <el-tag :type="result.success ? 'success' : 'danger'">
-            {{ result.success ? '绑定成功' : '绑定失败' }}
-          </el-tag>
-          <span v-if="result.domain" class="nx-mono">{{ result.domain }}</span>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <el-tag :type="result.success ? 'success' : 'danger'">
+              {{ result.success ? '绑定成功' : '绑定失败' }}
+            </el-tag>
+            <span v-if="result.domain" class="nx-mono">{{ result.domain }}</span>
+          </div>
+          <el-button
+            v-if="result.success && result.domain"
+            type="danger"
+            plain
+            size="small"
+            :loading="unbinding"
+            @click="doUnbind"
+          >解绑</el-button>
         </div>
       </template>
       <div v-if="result.success">
