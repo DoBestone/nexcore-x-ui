@@ -386,6 +386,18 @@ func (s *SettingService) GetSecureEntryPath() string {
 	return v
 }
 
+// SetSecureEntryEnabled / SetSecureEntryPath — 安全入口的写侧。CLI
+// (`setting -secureEntry on -secureEntryPath xxx`) 和 REST PATCH /settings
+// 都用这两条。打开 / 改 path 都需要重启或 SIGHUP 才生效(initRouter 在
+// 启动期把 path 拼进 basePath,运行时不动态切换)。
+func (s *SettingService) SetSecureEntryEnabled(enabled bool) error {
+	return s.setBool("secureEntryEnabled", enabled)
+}
+
+func (s *SettingService) SetSecureEntryPath(path string) error {
+	return s.setString("secureEntryPath", strings.TrimSpace(path))
+}
+
 // GetNodeAddress 返回操作员配置的"节点地址"(分享链接里写的 host)。
 // 空字符串 = 退回到浏览器访问面板的 Host。CF 橙云 + 面板域名场景下这是
 // "客户端连得通"的关键 — CF 不代理 xray 跑的非标端口,链接 host 必须

@@ -43,6 +43,17 @@ extract_banner_password() {
         | sed -E 's/^[[:space:]]*password:[[:space:]]+//'
 }
 
+# v2.3.0+ 首装 banner 多了一行 `api token:` —— admin-scope plaintext API
+# token,跟密码同样的 once-and-gone。错过 journal 窗口就只能登面板新发。
+extract_banner_api_token() {
+    local since="${1:-1 day ago}"
+    journalctl -u "${SERVICE_NAME}" --since "${since}" --no-pager --output=cat 2>/dev/null \
+        | awk '/first-run install info/{found=1; tok=""}
+               found && /^[[:space:]]*api token:/{tok=$0}
+               END{print tok}' \
+        | sed -E 's/^[[:space:]]*api token:[[:space:]]+//'
+}
+
 ASSUME_YES=false
 QUIET=false
 
@@ -233,8 +244,9 @@ cmd_creds() {
     # 试图在 journal 里捞首装明文密码。如果 journal retention 够长就能拿到;
     # 否则只能告诉操作员去 reset。binary 改过密码 / 从面板内改过 都不会出现新 banner,
     # 这条路径**只对从未改过密码的"首装窗口"操作员有意义**。
-    local pwd
+    local pwd tok
     pwd="$(extract_banner_password "30 days ago")"
+    tok="$(extract_banner_api_token "30 days ago")"
     if [[ -n "${pwd}" ]]; then
         echo
         hdr "首装明文密码 (从 journal 提取)"
@@ -245,6 +257,14 @@ cmd_creds() {
         echo
         warn "journal 里没找到首装密码 banner(retention 滚了 / 装机超过 30 天)"
         warn "已经记不起密码?直接 ${C}${CMD_NAME} reset${N} 强制重新生成一份"
+    fi
+    if [[ -n "${tok}" ]]; then
+        echo
+        hdr "首装 API Token (admin scope, 从 journal 提取)"
+        echo "  ${C}${tok}${N}"
+        echo
+        info "调用示例: curl -H \"Authorization: Bearer <token>\" http://<host>:<port>/api/v1/health"
+        info "面板 Tokens 页可以列表 / 命名 / 撤销 / 新发"
     fi
 }
 

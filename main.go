@@ -18,6 +18,7 @@ import (
 	"nexcore-x-ui/config"
 	"nexcore-x-ui/database"
 	"nexcore-x-ui/logger"
+	"nexcore-x-ui/util/random"
 	"nexcore-x-ui/v2ui"
 	"nexcore-x-ui/web"
 	"nexcore-x-ui/web/global"
@@ -76,6 +77,28 @@ func runWebServer() {
 	// 工具会顺手把它收走,不必要的暴露面。journal 已经是凭据的真理之源,
 	// 没必要再搞一份。
 	if info != nil && info.Generated {
+		// 首装一并发一把 admin-scope API token,操作员零步骤拿到一把可
+		// 直接调 /api/v1/* 的 token,不必登面板再去 UI 里手发一个。
+		// 跟密码一样,plaintext 只在这一行 banner 里出现一次,DB 里只
+		// 存 SHA256 hash。错过 → 用 panel 内"Tokens"页签新发一把,或
+		// `nexcore-x-ui reset`(连同 admin 一起重置)。
+		//
+		// 仅当 api_tokens 表是空的时候才发 — 这样 `nexcore-x-ui reset`
+		// (清 admin + webPort 但保留 api_tokens 让旧集成不断)再次走到
+		// 这条路径时,不会churn 出第二把意外的 token 。
+		tokenLine := "(skipped — existing tokens preserved; manage via panel)"
+		tokenSvc := service.APITokenService{}
+		if existing, err := tokenSvc.ListTokens(); err != nil {
+			tokenLine = "(read failed: " + err.Error() + ")"
+			logger.Warning("first-run api token count failed:", err)
+		} else if len(existing) == 0 {
+			if created, terr := tokenSvc.CreateToken("first-install", service.ScopeAdmin, 0); terr == nil {
+				tokenLine = created.Plaintext
+			} else {
+				tokenLine = "(generation failed: " + terr.Error() + " — issue one via panel)"
+				logger.Warning("first-run api token mint failed:", terr)
+			}
+		}
 		fmt.Println("=================================================")
 		fmt.Println("  NexCore x-ui · first-run install info")
 		fmt.Println("  ★ RECORD THIS NOW — only copy lives in journal")
@@ -83,7 +106,11 @@ func runWebServer() {
 		fmt.Printf("  panel port: %d\n", info.Port)
 		fmt.Printf("  username:   %s\n", info.Username)
 		fmt.Printf("  password:   %s\n", info.Password)
+		fmt.Printf("  api token:  %s\n", tokenLine)
+		fmt.Printf("  api scope:  admin (full /api/v1/* — POST/PUT/DELETE all)\n")
 		fmt.Println("  → http://<server-ip>:" + fmt.Sprint(info.Port))
+		fmt.Println("    curl -H \"Authorization: Bearer <api token>\" \\")
+		fmt.Println("      http://<server-ip>:" + fmt.Sprint(info.Port) + "/api/v1/health")
 		fmt.Println("=================================================")
 		fmt.Println("  忘记可用: nexcore-x-ui reset  (强制重新生成)")
 		fmt.Println("=================================================")
@@ -356,6 +383,74 @@ func updateSetting(port int, username string, password string) {
 	}
 }
 
+// applySecureEntry 是 `setting -secureEntry on|off [-secureEntryPath xxx]`
+// 的处理器。语义:
+//   - secureEntry == "on":开启;path 为空时自动生成 24 位 alnum slug。
+//   - secureEntry == "off":关闭;不动 path(留着方便 re-enable 时复用)。
+//   - secureEntry == "":只改 path(若 -secureEntryPath 给了)。
+//
+// 改完不重启进程 — 安全入口在 initRouter 启动期把 path 拼进 basePath,
+// 运行时不动态切换。CLI 调用方(install.sh / nexcore-x-ui.sh)负责
+// 后续 systemctl restart 让新 basePath 生效。
+//
+// 错误用 stderr + 非零 exit code,这样调用方脚本能 set -e 兜住。
+func applySecureEntry(toggle, path string) {
+	if database.GetDB() == nil {
+		if err := database.InitDB(config.GetDBPath()); err != nil {
+			fmt.Fprintln(os.Stderr, "open db failed:", err)
+			os.Exit(1)
+		}
+	}
+	settingService := service.SettingService{}
+
+	toggle = strings.ToLower(strings.TrimSpace(toggle))
+	switch toggle {
+	case "on":
+		// path 来源:命令行优先,空则看 DB 现存(re-enable 复用旧 slug),
+		// DB 也空才新生成。re-enable 复用旧 slug 是有意为之 — 操作员
+		// "临时关一下"再开,不该把已经发出去的 secret URL 全废掉。
+		newPath := strings.TrimSpace(path)
+		if newPath == "" {
+			newPath = strings.TrimSpace(settingService.GetSecureEntryPath())
+		}
+		if newPath == "" {
+			newPath = random.Seq(24)
+		}
+		if err := settingService.SetSecureEntryPath(newPath); err != nil {
+			fmt.Fprintln(os.Stderr, "set secureEntryPath failed:", err)
+			os.Exit(1)
+		}
+		if err := settingService.SetSecureEntryEnabled(true); err != nil {
+			fmt.Fprintln(os.Stderr, "set secureEntryEnabled failed:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("secure entry: ENABLED, path = %s\n", newPath)
+		fmt.Println("→ 重启服务后生效:systemctl restart nexcore-x-ui")
+	case "off":
+		if err := settingService.SetSecureEntryEnabled(false); err != nil {
+			fmt.Fprintln(os.Stderr, "set secureEntryEnabled failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println("secure entry: DISABLED (path 保留,日后 -secureEntry on 可复用)")
+		fmt.Println("→ 重启服务后生效:systemctl restart nexcore-x-ui")
+	case "":
+		// 只改 path,不切开关。enabled 状态不动。
+		if path == "" {
+			fmt.Fprintln(os.Stderr, "-secureEntryPath empty and -secureEntry not given — nothing to do")
+			os.Exit(2)
+		}
+		if err := settingService.SetSecureEntryPath(strings.TrimSpace(path)); err != nil {
+			fmt.Fprintln(os.Stderr, "set secureEntryPath failed:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("secure entry path updated: %s\n", strings.TrimSpace(path))
+		fmt.Println("→ 重启服务后生效:systemctl restart nexcore-x-ui")
+	default:
+		fmt.Fprintln(os.Stderr, "-secureEntry must be one of: on, off")
+		os.Exit(2)
+	}
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		runWebServer()
@@ -390,6 +485,8 @@ func main() {
 	var tgbotRuntime string
 	var reset bool
 	var show bool
+	var secureEntry string
+	var secureEntryPath string
 	settingCmd.BoolVar(&reset, "reset", false, "reset all settings")
 	settingCmd.BoolVar(&show, "show", false, "show current settings")
 	settingCmd.IntVar(&port, "port", 0, "set panel port")
@@ -400,6 +497,8 @@ func main() {
 	settingCmd.StringVar(&tgbotRuntime, "tgbotRuntime", "", "set telegrame bot cron time")
 	settingCmd.IntVar(&tgbotchatid, "tgbotchatid", 0, "set telegrame bot chat id")
 	settingCmd.BoolVar(&enabletgbot, "enabletgbot", false, "enable telegram bot notify")
+	settingCmd.StringVar(&secureEntry, "secureEntry", "", "enable/disable 安全入口 (on|off; empty = no change)")
+	settingCmd.StringVar(&secureEntryPath, "secureEntryPath", "", "secure entry slug (empty when enabling = auto-generate 24-char)")
 
 	oldUsage := flag.Usage
 	flag.Usage = func() {
@@ -454,6 +553,9 @@ func main() {
 				_ = os.Unsetenv("NEXCORE_PASSWORD")
 			}
 			updateSetting(port, username, password)
+		}
+		if secureEntry != "" || secureEntryPath != "" {
+			applySecureEntry(secureEntry, secureEntryPath)
 		}
 		if show {
 			showSetting(show)

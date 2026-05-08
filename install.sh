@@ -40,11 +40,21 @@ SERVICE_FILE="/etc/systemd/system/${CMD_NAME}.service"
 
 FORCE=false
 TARGET_VERSION=""
+# 安装时是否一并打开"安全入口"(把面板钉到 /<random-slug>/ 路径下,
+# 其它路径裸 404)。用法:
+#   bash <(curl ... install.sh) --secure-entry              # 自动 24-char slug
+#   bash <(curl ... install.sh) --secure-entry=mySecret123  # 自定 slug
+#   SECURE_ENTRY=1 bash <(curl ... install.sh)              # 等价 --secure-entry
+# 也可以两个并存,自定路径吃命令行不吃 ENV(命令行优先)。
+ENABLE_SECURE_ENTRY="${SECURE_ENTRY:-}"
+SECURE_ENTRY_PATH="${SECURE_ENTRY_PATH:-}"
 for arg in "$@"; do
     case "$arg" in
-        --force|-f)  FORCE=true ;;
-        v*|V*)       TARGET_VERSION="$arg" ;;
-        *)           TARGET_VERSION="$arg" ;;
+        --force|-f)             FORCE=true ;;
+        --secure-entry)         ENABLE_SECURE_ENTRY=1 ;;
+        --secure-entry=*)       ENABLE_SECURE_ENTRY=1; SECURE_ENTRY_PATH="${arg#*=}" ;;
+        v*|V*)                  TARGET_VERSION="$arg" ;;
+        *)                      TARGET_VERSION="$arg" ;;
     esac
 done
 
@@ -342,6 +352,17 @@ extract_banner_password() {
         | sed -E 's/^[[:space:]]*password:[[:space:]]+//'
 }
 
+# extract_banner_api_token —— 跟 password 同款,只看 first-run banner 里
+# `api token:` 那一行。错过这一行(journal 滚掉、运维直接 systemctl
+# restart 而不是首装)就拿不回来了 — 跟密码同样的"once-and-gone"模型。
+extract_banner_api_token() {
+    journalctl -u "${CMD_NAME}" --since "10 minutes ago" --no-pager --output=cat 2>/dev/null \
+        | awk '/first-run install info/{found=1; tok=""}
+               found && /^[[:space:]]*api token:/{tok=$0}
+               END{print tok}' \
+        | sed -E 's/^[[:space:]]*api token:[[:space:]]+//'
+}
+
 show_credentials() {
     echo
     echo -e "${green}═════════════════════════════════════════════${plain}"
@@ -354,8 +375,9 @@ show_credentials() {
 
     # 2) 明文密码 — 只此一次,从 journal 提取。binary 在首装 banner 里 println 一次,
     # 之后 bcrypt 哈希进 DB,无法恢复。错过这次显示就只能 ${CMD_NAME} reset。
-    local pwd
+    local pwd tok
     pwd="$(extract_banner_password)"
+    tok="$(extract_banner_api_token)"
     if [[ -n "${pwd}" ]]; then
         echo
         echo -e "  ${yellow}首装明文密码 (★ 立即记录,后续无法回查):${plain}"
@@ -365,6 +387,15 @@ show_credentials() {
         warn "未在 journal 里抓到首装密码 banner — 用下面命令自查:"
         echo -e "    ${cyan}journalctl -u ${CMD_NAME} | grep -E 'panel port|username|password' | tail -10${plain}"
         echo -e "  或直接重置一份新密码: ${cyan}${CMD_NAME} reset${plain}"
+    fi
+    # API token 是 v2.3.0+ 首装一并发的 admin-scope token,跟密码一样
+    # plaintext 只此一次。括号内的提示串(读取失败 / preserved 等)出现时
+    # 就直接照搬,提醒操作员"这把 token 状态不对劲"。
+    if [[ -n "${tok}" ]]; then
+        echo
+        echo -e "  ${yellow}首装 API Token (admin scope, ★ 立即记录):${plain}"
+        echo -e "    ${green}${tok}${plain}"
+        echo -e "  调用示例: ${cyan}curl -H \"Authorization: Bearer ${tok}\" http://<host>:<port>/api/v1/health${plain}"
     fi
 
     echo
@@ -418,6 +449,23 @@ else
     echo -e "  最近日志:"
     journalctl -u "${CMD_NAME}" -n 30 --no-pager | grep -E 'NexCore|first-run|panel port|username|password|error|warn' || \
         journalctl -u "${CMD_NAME}" -n 30 --no-pager
+fi
+
+# 安装时启用安全入口 — 必须在 first-run admin 落库之后做,因为 setting CLI
+# 走 InitDB,DB 还没建好的话会报错。打开后必须 systemctl restart 让新
+# basePath 生效(initRouter 启动期才把 path 拼进 basePath)。
+# 失败用 warn 而非 die — 安装本体已经成功,operator 仍可用面板 UI 后补。
+if [[ -n "${ENABLE_SECURE_ENTRY}" ]]; then
+    step "启用安全入口(--secure-entry)…"
+    if "${INSTALL_DIR}/${CMD_NAME}" setting -secureEntry on -secureEntryPath "${SECURE_ENTRY_PATH}"; then
+        if systemctl restart "${CMD_NAME}"; then
+            ok "安全入口已启用,面板路径已切换"
+        else
+            warn "setting 写入成功,但 systemctl restart 失败 — 手动:systemctl restart ${CMD_NAME}"
+        fi
+    else
+        warn "启用安全入口失败 — 安装本体已成功,可后续用:${cyan}${CMD_NAME} setting -secureEntry on${plain}"
+    fi
 fi
 
 show_credentials
