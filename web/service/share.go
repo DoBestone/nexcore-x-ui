@@ -9,8 +9,18 @@ import (
 	"net/url"
 	"strings"
 
+	qrcode "github.com/skip2/go-qrcode"
+
 	"nexcore-x-ui/database/model"
 )
+
+// EmailShare 是 LinksByEmailWithQRCtx 的返回元素:每个 email 客户端的
+// 分享链接原文 + 对应 PNG QR 的完整 data URL。data URL 形式让前端 / 业务
+// 系统可直接 <img src> 或落盘,免去二次 base64 拼头。
+type EmailShare struct {
+	Link   string `json:"link"`
+	QRCode string `json:"qrcode"`
+}
 
 // ValidateShareHostSyntactic enforces format constraints on the host
 // component of a share link. It rejects:
@@ -201,6 +211,40 @@ func (s *ShareService) LinksByEmailCtx(ctx context.Context, inboundID int, host 
 		return nil, err
 	}
 	return s.linksByEmailFromLoadedInbound(in, host)
+}
+
+// LinksByEmailWithQRCtx 在 LinksByEmail 之上叠一层 PNG QR 编码,返回
+// {<email>: {Link, QRCode}}。QRCode 是 "data:image/png;base64,..." 完整
+// data URL,中等纠错率(M),256x256 px —— 客户端常见取景框尺寸下扫码
+// 容错 + 信息密度的折衷。生成失败的 email 整行被跳过(不让一个坏链接
+// 拖累整个 inbound 的查询)。
+//
+// 复用 linksByEmailFromLoadedInbound 的成熟逻辑,只在外面套 QR encode。
+// 不引入额外 DB 查询,跟 LinksByEmailCtx 同复杂度。
+func (s *ShareService) LinksByEmailWithQRCtx(ctx context.Context, inboundID int, host string) (map[string]EmailShare, error) {
+	in, err := s.inboundService.GetInboundCtx(ctx, inboundID)
+	if err != nil {
+		return nil, err
+	}
+	links, err := s.linksByEmailFromLoadedInbound(in, host)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]EmailShare, len(links))
+	for email, link := range links {
+		png, err := qrcode.Encode(link, qrcode.Medium, 256)
+		if err != nil {
+			// 单个 QR 编码失败不致命:link 仍然有效,可在 UI 上显示文本。
+			// 跳过 qrcode 字段,不让坏链接挡住整个返回。
+			out[email] = EmailShare{Link: link, QRCode: ""}
+			continue
+		}
+		out[email] = EmailShare{
+			Link:   link,
+			QRCode: "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
+		}
+	}
+	return out, nil
 }
 
 func (s *ShareService) linksByEmailFromLoadedInbound(in *model.Inbound, host string) (map[string]string, error) {

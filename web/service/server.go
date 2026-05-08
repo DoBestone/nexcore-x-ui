@@ -141,17 +141,20 @@ func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 		// 排除两种坏情况:
 		//   1. lastStatus == nil:首次采样,无差可减,速率留 0(累计字节
 		//      仍正确填充 NetTraffic.Sent/Recv,前端可自己算)。
-		//   2. lastStatus 太陈旧(> 30s):用它算出的"30 分钟均值速率"
-		//      跟"瞬时速率"语义脱节,UI 上是误导;treat 等同未采样。
-		//      30s 上限来自:面板 cron 是 @every 2s,API 调用方典型轮询
-		//      间隔 5–15s,30s 给慢轮询者留余量,再大就是聚合了。
+		//   2. lastStatus 太陈旧(> 5min):用它算出的"几十分钟均值"跟
+		//      "瞬时速率"已经脱节,treat 等同未采样。原本 30s 太严格 ——
+		//      v1 API 里 lastStatus 仅靠"上次请求"来更新,业务系统轮询
+		//      间隔做 1–2 分钟很常见,每次都被判 stale → 永远 0。现在
+		//      v1 也起了 @every 5s ticker 主动刷新(register 里挂 cron),
+		//      所以 lastStatus.T 正常就 ≤ 5s;5min 是给"ticker 暂停 /
+		//      慢轮询者落到 cache 之外"的极端边角再加一层兜底。
 		//   3. 计数回卷(uint64 下溢):虚机迁移、网卡 down/up、计数器
 		//      复位都会让 current < last,直接相减会下溢成天文数字。
 		//      检测到反转就跳过这一拍,等下一拍再算。
 		if lastStatus != nil {
 			duration := now.Sub(lastStatus.T)
 			seconds := duration.Seconds()
-			if seconds > 0 && seconds <= 30 &&
+			if seconds > 0 && seconds <= 300 &&
 				status.NetTraffic.Sent >= lastStatus.NetTraffic.Sent &&
 				status.NetTraffic.Recv >= lastStatus.NetTraffic.Recv {
 				status.NetIO.Up = uint64(float64(status.NetTraffic.Sent-lastStatus.NetTraffic.Sent) / seconds)

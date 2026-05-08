@@ -1226,7 +1226,7 @@ panel 60s 周期解析 xray access.log,把 `(email/tag, sourceIP)` 在内存维�
 | 参数 | 必填 | 类型 | 说明 |
 |---|---|---|---|
 | id | 是 | int | URL 路径段 |
-| host | 是 | string | 节点对外域名/IP,query 参数 |
+| host | 否 | string | 节点对外域名/IP,query 参数。**v2.5+** 起可省 — 自动 `?host=` → `settings.nodeAddress` → 请求 Host(去 port)兜底,跟 panel 路径同款。 |
 
 **请求示例:**
 
@@ -1244,6 +1244,55 @@ curl -H "Authorization: Bearer $TOKEN" \
 | 响应 | 类型 | 说明 |
 |---|---|---|
 | data | string[] | share URI 列表,每个 client 一条 |
+
+---
+
+### `GET /inbounds/:id/links/by-email`
+
+**v2.5+** 单入站所有 email 客户端的 `{link, qrcode}` 索引,一次拉齐 + 直接渲染二维码用。
+
+`qrcode` 是中等纠错率(M)、256x256 的 PNG QR,以完整 `data:image/png;base64,...` data URL 形式返回 — 前端可直接 `<img src=...>`,curl 也能 `jq -r .data.alice.qrcode | sed 's/.*,//' | base64 -d > alice.png` 一气呵成存盘。
+
+| 参数 | 必填 | 类型 | 说明 |
+|---|---|---|---|
+| id | 是 | int | URL 路径段 |
+| host | 否 | string | 同 `/inbounds/:id/links`,可省自动兜底 |
+
+**响应示例:**
+
+```json
+{
+  "data": {
+    "alice": {
+      "link":   "vless://uuid-1@cdn.example.com:443?...#alice",
+      "qrcode": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
+    },
+    "bob":   { "link": "vless://...#bob", "qrcode": "data:image/png;base64,..." }
+  }
+}
+```
+
+只覆盖**有 email** 的多用户协议(VLESS / VMess / Trojan / SS-2022)。SS-legacy 这种 inbound 级别的链接不在这里返回 —— 用 `/inbounds/:id/links` 拿。
+
+---
+
+### `GET /inbounds/:id/clients/:email/share`
+
+**v2.5+** 单个 email 客户端的 `{link, qrcode}` 直查。`/links/by-email` 的单点版本,业务系统按 email 取一条更直观。
+
+| 参数 | 必填 | 类型 | 说明 |
+|---|---|---|---|
+| id | 是 | int | URL 路径段 |
+| email | 是 | string | URL 路径段 |
+| host | 否 | string | 同上,可省 |
+
+**响应示例:**
+
+```json
+{ "data": { "link": "vless://...#alice", "qrcode": "data:image/png;base64,..." } }
+```
+
+email 不在该 inbound 的 settings.clients[] 里(或协议不支持 share link)→ `404 client_not_found`。
 
 ---
 

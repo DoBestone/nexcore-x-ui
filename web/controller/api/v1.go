@@ -11,7 +11,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"nexcore-x-ui/database/model"
+	"nexcore-x-ui/logger"
 	"nexcore-x-ui/web/entity"
+	"nexcore-x-ui/web/global"
 	"nexcore-x-ui/web/service"
 )
 
@@ -203,6 +205,16 @@ func (a *V1Controller) register(g *gin.RouterGroup) {
 	api.PATCH("/clients/:email/enable", a.setClientEnable) // 对称 PATCH /inbounds/:id/enable
 	api.POST("/clients/disable-expired", a.disableExpiredClients)
 
+	// v2.5.0 share-link + QR API —— 业务系统对接面。
+	//   GET /inbounds/:id/links/by-email      → {<email>: {link, qrcode}}
+	//   GET /inbounds/:id/clients/:email/share → {link, qrcode} 单个客户端
+	// qrcode 是完整的 data:image/png;base64,... data URL,可直接喂 <img src>。
+	// host 解析顺序:?host= → settings.nodeAddress → c.Request.Host(去 port)。
+	// 跟 panel 的 /xui/api/inbounds/:id/links 同款,免去"忘传 host=400"。
+	// 仍走 ValidateShareHostSyntactic + subAllowedHosts 白名单。
+	sub.GET("/inbounds/:id/links/by-email", a.inboundLinksByEmail)
+	sub.GET("/inbounds/:id/clients/:email/share", a.clientShare)
+
 	api.POST("/certs", a.uploadCert)
 	api.DELETE("/certs/:name", a.deleteCert)
 
@@ -217,6 +229,25 @@ func (a *V1Controller) register(g *gin.RouterGroup) {
 	api.POST("/login-tokens", a.createMagicToken)
 	api.DELETE("/access-logs", a.purgeAccessLogs)
 	api.POST("/system/update-apply", a.updateApply)
+
+	// /server/status 的瞬时速率(NetIO.Up/Down)依赖跨拍 lastStatus 做差。
+	// 旧设计下 lastStatus 仅靠"上次请求"刷新,业务系统轮询 1–2 分钟一次
+	// 时,每次都被 ServerService 判 stale → 永远拿 0。这里挂一条
+	// @every 5s 主动 ticker,跟 panel 的 /server/status cron 一个套路:
+	// 无论调用方多久来一次,handler 返回的 rate 都基于"最近 5s 窗口",
+	// 跟 panel 行为对齐。失败不致命 —— 即使 cron 未注册,handler 仍能
+	// 用请求驱动的方式工作(只是慢轮询场景拿 0)。
+	if ws := global.GetWebServer(); ws != nil {
+		if cr := ws.GetCron(); cr != nil {
+			if _, err := cr.AddFunc("@every 5s", func() {
+				a.serverStatusMu.Lock()
+				a.serverStatusLast = a.serverService.GetStatus(a.serverStatusLast)
+				a.serverStatusMu.Unlock()
+			}); err != nil {
+				logger.Warning("v1 server-status ticker register failed:", err)
+			}
+		}
+	}
 }
 
 // ---------- handlers ----------
@@ -1359,12 +1390,35 @@ func (a *V1Controller) validateShareHost(host string) (string, string) {
 	return cleaned, ""
 }
 
+// resolveShareHost 决定 share/QR 类 endpoint 用哪个 host 拼链接。优先级:
+//
+//  1. ?host= 显式参数 —— 业务系统拼跨节点订阅 / 一份 token 多个出口时用
+//  2. settings.nodeAddress —— 操作员配的"对外节点地址",CF 橙云 / NAT 反代
+//     场景必须用,否则链接 host 是面板的代理域,客户端打非标端口超时
+//  3. c.Request.Host —— 老行为兜底,兼容没配 nodeAddress 的旧部署
+//
+// 跟 panel 路径 (api_panel.go::inboundLinks) 完全一致,消除"v1 必须显式传
+// host 否则 400"这条陷阱。最终结果仍走 validateShareHost(语法 + 白名单)。
+func (a *V1Controller) resolveShareHost(c *gin.Context) (string, string) {
+	host := strings.TrimSpace(c.Query("host"))
+	if host == "" {
+		host = a.settingService.GetNodeAddress()
+	}
+	if host == "" {
+		host = c.Request.Host
+		if i := strings.IndexByte(host, ':'); i >= 0 {
+			host = host[:i]
+		}
+	}
+	return a.validateShareHost(host)
+}
+
 func (a *V1Controller) inboundLinks(c *gin.Context) {
 	id, ok := parseIntParam(c, "id")
 	if !ok {
 		return
 	}
-	host, reason := a.validateShareHost(c.Query("host"))
+	host, reason := a.resolveShareHost(c)
 	if host == "" {
 		BadRequest(c, "invalid_host", reason)
 		return
@@ -1375,6 +1429,58 @@ func (a *V1Controller) inboundLinks(c *gin.Context) {
 		return
 	}
 	OK(c, links)
+}
+
+// inboundLinksByEmail 返回该入站下每个 email 客户端的 {link, qrcode} 映射,
+// 给业务系统一次拉齐用。host 走 resolveShareHost 兜底。qrcode 是完整 PNG
+// data URL(data:image/png;base64,...),可直接 <img src> 或塞响应里下发。
+func (a *V1Controller) inboundLinksByEmail(c *gin.Context) {
+	id, ok := parseIntParam(c, "id")
+	if !ok {
+		return
+	}
+	host, reason := a.resolveShareHost(c)
+	if host == "" {
+		BadRequest(c, "invalid_host", reason)
+		return
+	}
+	out, err := a.shareService.LinksByEmailWithQRCtx(c.Request.Context(), id, host)
+	if err != nil {
+		BadRequest(c, mapClientErr(err), err.Error())
+		return
+	}
+	OK(c, out)
+}
+
+// clientShare 单个 email 客户端的 {link, qrcode} 查询。/links/by-email 的
+// 单点版本,免拉整张表 + 业务系统按 email 取一条更直观。404 当且仅当
+// 入站存在但该 email 不在 settings.clients[](或者协议不支持 share link)。
+func (a *V1Controller) clientShare(c *gin.Context) {
+	id, ok := parseIntParam(c, "id")
+	if !ok {
+		return
+	}
+	email := strings.TrimSpace(c.Param("email"))
+	if email == "" {
+		BadRequest(c, "missing_email", "email path parameter required")
+		return
+	}
+	host, reason := a.resolveShareHost(c)
+	if host == "" {
+		BadRequest(c, "invalid_host", reason)
+		return
+	}
+	all, err := a.shareService.LinksByEmailWithQRCtx(c.Request.Context(), id, host)
+	if err != nil {
+		BadRequest(c, mapClientErr(err), err.Error())
+		return
+	}
+	share, found := all[email]
+	if !found {
+		NotFound(c, "client_not_found", "email not in this inbound or protocol has no share link")
+		return
+	}
+	OK(c, share)
 }
 
 func (a *V1Controller) subscriptionOne(c *gin.Context) {
