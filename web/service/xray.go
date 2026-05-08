@@ -3,6 +3,8 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"strings"
 	"sync"
 	"nexcore-x-ui/database/model"
 	"nexcore-x-ui/logger"
@@ -320,6 +322,22 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, error) {
 	return p.GetTraffic(true)
 }
 
+// PeekXrayTraffic — 只读快照,不重置 xray 内部计数。给外部监控 / 主控
+// 想高频轮询(每 5s 一次)实时流量、又不想跟 panel 自身的 XrayTrafficJob
+// 抢消费 stats 时用。XrayTrafficJob 走 GetXrayTraffic(reset=true) 把 stat
+// 累加到 DB,如果外部调用方也 reset 就会"截胡":job 拿到的 delta 是 0,
+// DB 累计漏算。Peek 用 reset=false,xray 计数器不动,job 仍能正常累计。
+//
+// 注意:连续两次 Peek 拿到的是"自上次 reset 起的累计",不是"两次 Peek
+// 之间的 delta"。需要 delta 自己记上次值再减。这是 xray stats API 的
+// 语义,不是 panel 的取舍。
+func (s *XrayService) PeekXrayTraffic() ([]*xray.Traffic, error) {
+	if !s.IsXrayRunning() {
+		return nil, errors.New("xray is not running")
+	}
+	return p.GetTraffic(false)
+}
+
 func (s *XrayService) RestartXray(isForce bool) error {
 	lock.Lock()
 	defer lock.Unlock()
@@ -392,4 +410,31 @@ func (s *XrayService) GetRecentLogs() string {
 		return ""
 	}
 	return p.GetResult()
+}
+
+// GetRecentAccessLog 读 bin/access.log 末尾 maxLines 行,给 /xray/logs?kind=access
+// 用。和 GetRecentLogs(stderr 缓冲区)是两路独立数据源 —— stderr 走 xray
+// subprocess 内存 ring buffer(进程死了就没),access 走文件(OnlineIPService
+// 周期性 truncate 限大小,但 xray 仍持续写入)。
+//
+// 实现走"全量读 + 拆 \n + 取末尾 N"。OnlineIPService.truncateLoop 会把
+// access.log 限制在 ~32MB,内存可承受;追求更省 I/O 的 ringseek 方案不必要。
+// 文件不存在(xray 还没第一次启动 / 启动失败)→ 返空串不报错,跟 stderr 路径
+// 一致(那边 p == nil 也返空)。
+func (s *XrayService) GetRecentAccessLog(maxLines int) (string, error) {
+	if maxLines <= 0 {
+		maxLines = 100
+	}
+	data, err := os.ReadFile(xray.GetAccessLogPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return strings.Join(lines, "\n"), nil
 }

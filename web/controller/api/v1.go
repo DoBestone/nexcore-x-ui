@@ -15,6 +15,7 @@ import (
 	"nexcore-x-ui/web/entity"
 	"nexcore-x-ui/web/global"
 	"nexcore-x-ui/web/service"
+	"nexcore-x-ui/xray"
 )
 
 // mapInboundErr maps service-layer typed errors into stable API error codes
@@ -640,8 +641,23 @@ func (a *V1Controller) dbTraffic(c *gin.Context) {
 	OK(c, out)
 }
 
+// liveTraffic 拉 xray 实时流量(从 stats gRPC API 读)。默认 reset=true
+// 跟 panel 内部 XrayTrafficJob 同语义 —— 取出来后清零,下次拿到的是 delta。
+//
+// **v2.5.2+ 新增 ?reset=false** —— 只读快照不清零,给外部监控 / 主控想
+// 高频轮询用。如果跟 XrayTrafficJob 抢消费(高频 reset=true 调这条),会
+// "截胡"job 的 delta,DB 累计漏算;reset=false 完全不动 xray 计数器,job
+// 仍正常累计。代价:连续 Peek 的值是"自上次 reset 起的累计",不是"两次
+// Peek 之间的 delta",外部要算 delta 自己记上次值再减。
 func (a *V1Controller) liveTraffic(c *gin.Context) {
-	items, err := a.xrayService.GetXrayTraffic()
+	reset := !(c.Query("reset") == "false" || c.Query("reset") == "0")
+	var items []*xray.Traffic
+	var err error
+	if reset {
+		items, err = a.xrayService.GetXrayTraffic()
+	} else {
+		items, err = a.xrayService.PeekXrayTraffic()
+	}
 	if err != nil {
 		Internal(c, "xray_traffic_failed", err)
 		return
@@ -669,7 +685,16 @@ func (a *V1Controller) listOnlineIpsByTag(c *gin.Context) {
 // 60s 滑窗,与 /online-ips/:tag 共用同一份内存状态。业务系统拼"某入站下哪个
 // client 在线、来自哪些 IP"时不必再 join /online-ips/:tag + clients[],直接
 // 查这条即可。
+//
+// **v2.5.2+ 新增 ?detailed=1** —— 切换到详尽视图,每个 email 返
+// {ips, inboundTag, lastSeenAt}(unix 毫秒)。前端 / 业务系统拼"客户挂在
+// 哪条入站、最后活动时间多久"用,不需要再 join /online-ips/:tag + clients[]。
+// 默认形态(无 detailed 参数)不变,保持向后兼容。
 func (a *V1Controller) listOnlineIpsByEmail(c *gin.Context) {
+	if c.Query("detailed") == "1" {
+		OK(c, service.GetOnlineIPService().GetIPsByEmailDetailed())
+		return
+	}
 	OK(c, service.GetOnlineIPService().GetIPsByEmail())
 }
 
@@ -1325,18 +1350,61 @@ func (a *V1Controller) xrayEffectiveConfig(c *gin.Context) {
 	c.String(200, cfg)
 }
 
+// xrayLogs 默认返 xray subprocess 的 stdout/stderr 缓冲(进程 ring buffer,
+// 重启即清),覆盖 xray 自身的启动/警告/错误信息。
+//
+// **v2.5.2+ 新增 ?kind=access|error|all**(默认 all = 沿用旧行为):
+//   - kind=error / 缺省 / kind=all → 旧 stderr 缓冲(进程内存)
+//   - kind=access                  → bin/access.log 末尾 100 行
+//     (xray 写文件,OnlineIPService 周期 truncate 防爆盘)
+//
+// 排查"客户连不上"看 access(谁在 connect、走哪条 inbound、email),"xray
+// 自身报错"看 error,两路独立。响应里加 kind 字段告诉调用方拿到的是哪一路。
 func (a *V1Controller) xrayLogs(c *gin.Context) {
-	OK(c, gin.H{"logs": a.xrayService.GetRecentLogs()})
+	kind := c.Query("kind")
+	switch kind {
+	case "access":
+		body, err := a.xrayService.GetRecentAccessLog(100)
+		if err != nil {
+			Internal(c, "access_log_read_failed", err)
+			return
+		}
+		OK(c, gin.H{"logs": body, "kind": "access"})
+	case "", "all", "error":
+		// 默认 / all / error 都走 stderr 缓冲。error 跟 all 同义 —— 当前实现
+		// xray 模板没单独配 error log file,error 写进 stderr 跟一般日志合流,
+		// 单分一路意义不大;留这个名字给未来真支持分流时无缝替换。
+		out := "all"
+		if kind != "" {
+			out = kind
+		}
+		OK(c, gin.H{"logs": a.xrayService.GetRecentLogs(), "kind": out})
+	default:
+		BadRequest(c, "invalid_kind", "kind must be access, error, or all")
+	}
 }
 
+// xrayTemplateGet 返 xray config 模板。**v2.5.2+ 起改用 {data: <obj>} envelope**,
+// 跟其他 v1 端点一致;此前是 raw JSON text 不带壳,对接的人要写两套解析。
+//
+// 模板内容是 xray 接受的 JSON,GET 出来直接是 object;PUT 仍接收 raw 字节
+// (PUT 走 c.GetRawData,避免 json.Decode 改字段顺序)。GET → 改 → PUT 的
+// 流程 = 解 obj → 改字段 → JSON.stringify → PUT。
 func (a *V1Controller) xrayTemplateGet(c *gin.Context) {
 	tpl, err := a.settingService.GetXrayConfigTemplate()
 	if err != nil {
 		Internal(c, "db_error", err)
 		return
 	}
-	c.Header("Content-Type", "application/json; charset=utf-8")
-	c.String(200, tpl)
+	var parsed any
+	if err := json.Unmarshal([]byte(tpl), &parsed); err != nil {
+		// 模板被损坏(用户手动改 DB / 旧版本 schema 不兼容)→ 仍把原文返回,
+		// 但加个 parseError 字段告诉调用方"格式有问题",免得静默丢回 200
+		// 让对方去 JSON.parse 一团糟。
+		OK(c, gin.H{"template": tpl, "parseError": err.Error()})
+		return
+	}
+	OK(c, parsed)
 }
 
 func (a *V1Controller) xrayTemplatePut(c *gin.Context) {

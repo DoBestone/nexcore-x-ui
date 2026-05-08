@@ -443,3 +443,45 @@ func (s *OnlineIPService) GetIPsByEmail() map[string][]string {
 	}
 	return out
 }
+
+// EmailOnlineDetail — GetIPsByEmailDetailed 返回的 per-email 视图:除了
+// 当前活跃 IP 列表,还带 inboundTag(走 emailToTag 反查)和 lastSeenAt
+// (该 email 所有 IP 里最新的一拍 access.log 时间戳,unix 毫秒)。给
+// 业务系统拼"客户在哪条入站、最后活动时间多久"用。
+type EmailOnlineDetail struct {
+	IPs        []string `json:"ips"`
+	InboundTag string   `json:"inboundTag"`
+	LastSeenAt int64    `json:"lastSeenAt"` // unix 毫秒
+}
+
+// GetIPsByEmailDetailed — 详尽版 GetIPsByEmail。inboundTag 走 emailToTag
+// 反查表(SS-2022 行 access.log 不写 [tag -> outbound],靠这张表补);
+// 反查不到留空串。lastSeenAt 是该 email 所有 IP 里最新一次 lastSeen,
+// 没有活跃 IP 的 email 不进结果(跟 GetIPsByEmail 一致,免空 entry 噪声)。
+func (s *OnlineIPService) GetIPsByEmailDetailed() map[string]EmailOnlineDetail {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cutoff := time.Now().Add(-onlineIPTTL)
+	out := make(map[string]EmailOnlineDetail, len(s.byEmail))
+	for email, ips := range s.byEmail {
+		var live []string
+		var newest time.Time
+		for ip, last := range ips {
+			if last.After(cutoff) {
+				live = append(live, ip)
+				if last.After(newest) {
+					newest = last
+				}
+			}
+		}
+		if len(live) == 0 {
+			continue
+		}
+		out[email] = EmailOnlineDetail{
+			IPs:        live,
+			InboundTag: s.emailToTag[email],
+			LastSeenAt: newest.UnixMilli(),
+		}
+	}
+	return out
+}

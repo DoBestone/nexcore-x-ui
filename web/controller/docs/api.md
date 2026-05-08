@@ -419,29 +419,57 @@ curl -H "Authorization: Bearer $TOKEN" $BASE/xray/config
 
 ### `GET /xray/logs`
 
-xray stdout/stderr 最近 ~100 行。
+xray 日志。**v2.5.2+ 加 `?kind=` 参数**,默认 `all` 保持向后兼容:
 
-无参数。
+| `kind=` | 内容 |
+|---|---|
+| 缺省 / `all` / `error` | xray subprocess stdout/stderr 缓冲(进程内存 ring,~100 行)。覆盖 xray 自身的 startup / 警告 / 错误。重启即清。 |
+| `access` | `bin/access.log` 末尾 100 行。"谁在 connect、走哪条 inbound、email 是谁",用来排查"客户连不上"。`OnlineIPService` 周期 truncate 控大小。 |
 
-**响应示例:**
+**响应示例(`?kind=access`):**
 
 ```jsonc
 {
   "data": {
-    "logs": ["2026/05/07 03:20:00 [Info] ...", "..."]
+    "logs": "2026/05/07 03:20:00.123 from 1.2.3.4:54321 accepted tcp:example.com:443 [inbound-12345 -> direct] email: alice\n...",
+    "kind": "access"
   }
 }
 ```
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| logs | string[] | 最末若干行,旧 → 新 |
+| logs | string | 整段文本(`\n` 分行,旧 → 新) |
+| kind | string | 实际返回的 kind(`access` / `error` / `all`),便于调用方区分 |
+
+> 历史响应是 `{logs: "..."}`(无 `kind`)。新增字段不影响旧调用方,旧形态仍兼容。
 
 ---
 
 ### `GET /xray/template`
 
-xray 基础配置模板(原始 JSON 字符串)。响应 `Content-Type: application/json`,直接是 JSON,**不**包裹 data 外壳。
+xray 基础配置模板。**v2.5.2+ 起改用 `{data: <obj>}` envelope**,跟其他 v1 端点一致;此前是 raw JSON 不带壳,对接的人要写两套解析。
+
+**响应示例:**
+
+```jsonc
+{
+  "data": {
+    "log":     { "loglevel": "info", "access": "bin/access.log" },
+    "api":     { "tag": "api", "services": ["StatsService", "HandlerService"] },
+    "stats":   {},
+    "policy":  { "system": { "statsInboundUplink": true, "statsInboundDownlink": true } },
+    "inbounds":  [],
+    "outbounds": [{ "tag": "direct",  "protocol": "freedom" },
+                  { "tag": "blocked", "protocol": "blackhole" }],
+    "routing": { "domainStrategy": "AsIs", "rules": [/* ... */] }
+  }
+}
+```
+
+> 模板被损坏(用户手动改 DB / schema 不兼容)→ 返 `{data: {template: "<raw>", parseError: "<msg>"}}`,字符串原文 + 错误描述,免静默丢一团坏 JSON 给调用方。
+>
+> PUT `/xray/template` 仍接收 **raw 字节**(避免 JSON re-marshal 时改字段顺序)。GET → 改 → PUT 的流程 = `JSON.stringify(response.data)` 直接喂回 PUT。
 
 无参数。
 
@@ -1142,15 +1170,17 @@ panel 60s 周期解析 xray access.log,把 `(email/tag, sourceIP)` 在内存维�
 
 按 client 维度。判定某个 client 是否在线、来自哪些 IP 时直接查这条。
 
-无参数。
+| 参数 | 必填 | 类型 | 说明 |
+|---|---|---|---|
+| detailed | 否 | string | `1` 切换到详尽视图,**v2.5.2+** 起支持 |
 
-**响应示例:**
+**响应示例(默认,无 `detailed`):**
 
 ```json
 {
   "data": {
     "alice": ["1.2.3.4"],
-    "bob":   []
+    "bob":   ["9.8.7.6", "9.8.7.7"]
   }
 }
 ```
@@ -1158,6 +1188,33 @@ panel 60s 周期解析 xray access.log,把 `(email/tag, sourceIP)` 在内存维�
 | 响应 | 类型 | 说明 |
 |---|---|---|
 | data | `map[string][]string` | email → IP 列表 |
+
+**响应示例(`?detailed=1`):**
+
+```jsonc
+{
+  "data": {
+    "alice": {
+      "ips":        ["1.2.3.4"],
+      "inboundTag": "inbound-443",
+      "lastSeenAt": 1746696000123
+    },
+    "bob": {
+      "ips":        ["9.8.7.6", "9.8.7.7"],
+      "inboundTag": "inbound-10086",
+      "lastSeenAt": 1746695999500
+    }
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| ips | string[] | 该 email 当前活跃源 IP 列表 |
+| inboundTag | string | 该 email 所属 inbound 的 tag(SS-2022 也走 emailToTag 反查表补)。空串 = 反查不到,通常发生在 client 刚被移出 settings 但 email 还在最近 5 分钟 access.log 里 |
+| lastSeenAt | int64 | 该 email 所有 IP 里最新一次 access.log 时间戳,**unix 毫秒** |
+
+> 不在 5 分钟滑窗里的 email 不进 map(空 entry 噪声没意义)。两种形态都遵守这个规则。
 
 ---
 
@@ -1189,11 +1246,16 @@ panel 60s 周期解析 xray access.log,把 `(email/tag, sourceIP)` 在内存维�
 
 ### `GET /traffic/live`
 
-实时拉 xray gRPC stats(`reset=true`),**会清零 xray 内部计数**,只能由 panel 心跳调,业务系统避免直接调。
+实时拉 xray gRPC stats。**v2.5.2+ 加 `?reset=` 选项**:
 
-> /traffic/live 把数据交回 panel 后,panel 会把增量累加进 DB。所以高频外部调用会让 panel 自己统计漏算。**只用于诊断**。
+| `reset=` | 行为 |
+|---|---|
+| 缺省 / `true` | xray 内部计数器清零(`reset_=true`),跟 panel 内部 `XrayTrafficJob` 同语义。**只能由 panel 心跳调,业务系统不要高频调用** —— 会跟 job 抢消费,panel 自己 DB 累计漏算。 |
+| `false` / `0` | 只读快照,不动 xray 计数器。**推荐外部监控 / 主控用这个**。代价:连续 Peek 拿到的是"自上次 reset 起的累计",不是"两次 Peek 之间的 delta",外部要算 delta 自己记上次值再减。 |
 
-无参数。
+| 参数 | 必填 | 类型 | 说明 |
+|---|---|---|---|
+| reset | 否 | string | `true` / `false` / `0`,默认 `true`(向后兼容) |
 
 **响应示例:**
 

@@ -82,9 +82,9 @@ plaintext 仅在创建时返回一次。
 | GET | `/server/status` | readonly | CPU / 内存 / 磁盘 / **瞬时上下行 B/s** / TCP/UDP 连接数 / 累计字节 / xray 状态 / 面板版本 |
 | GET | `/xray/status` | readonly | running / version |
 | GET | `/xray/config` | readonly | 当前生效的 xray 完整配置 JSON |
-| GET | `/xray/logs` | readonly | xray 子进程最近日志 |
-| GET | `/xray/template` | readonly | xray 配置模板(操作员可编辑的部分) |
-| PUT | `/xray/template` | admin | 写入新模板 → 触发 xray 重启 |
+| GET | `/xray/logs?kind=access\|error\|all` | readonly | xray 日志。**v2.5.2+ 加 `?kind=`**:`access` = `bin/access.log` 末 100 行(谁在 connect 走哪条 inbound),`error` / `all` / 缺省 = subprocess stdout/stderr 缓冲(xray 自身 startup / 警告 / 错误)。响应里加 `kind` 字段告诉调用方拿到的是哪一路 |
+| GET | `/xray/template` | readonly | xray 配置模板(操作员可编辑的部分)。**v2.5.2+** 起改用 `{data: <obj>}` envelope(此前是 raw JSON 不带壳),跟其他端点一致;PUT 仍接收 raw bytes,GET → 改 → PUT 流程 = `JSON.stringify(response.data)` 喂 PUT |
+| PUT | `/xray/template` | admin | 写入新模板 → 触发 xray 重启。仍接 raw JSON 字节 |
 | POST | `/xray/restart` | admin | 立即重启 xray 子进程 |
 
 `/server/status` 关键字段:`netIO.up` / `netIO.down`(B/s,**两次调用之间的均值**;
@@ -173,9 +173,9 @@ email 全局唯一,以下接口走 email 索引:
 | Method | Path | Scope | 说明 |
 |---|---|---|---|
 | GET | `/traffic` | readonly | DB 累计流量(每入站) |
-| GET | `/traffic/live` | readonly | xray 进程实时流量(`stats` API 抓取) |
+| GET | `/traffic/live?reset=true\|false` | readonly | xray 进程实时流量(`stats` API 抓取)。**v2.5.2+ 加 `?reset=false`** = 只读快照不清零,给外部监控高频轮询用,避免跟 panel `XrayTrafficJob` 抢消费导致 DB 累计漏算。默认 `reset=true` 保持兼容 |
 | GET | `/online-ips` | readonly | 当前在线 IP 列表 |
-| GET | `/online-ips-by-email` | readonly | 按 email 分组 |
+| GET | `/online-ips-by-email?detailed=0\|1` | readonly | 按 email 分组。**v2.5.2+ 加 `?detailed=1`** 返 `{<email>: {ips, inboundTag, lastSeenAt}}`(unix 毫秒);默认 `detailed=0` 保持 `{<email>: ["ip"]}` 兼容形态 |
 | GET | `/online-ips/:tag` | readonly | 按 inbound tag 过滤 |
 
 ### Tokens
