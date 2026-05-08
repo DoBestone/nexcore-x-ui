@@ -48,13 +48,37 @@ TARGET_VERSION=""
 # 也可以两个并存,自定路径吃命令行不吃 ENV(命令行优先)。
 ENABLE_SECURE_ENTRY="${SECURE_ENTRY:-}"
 SECURE_ENTRY_PATH="${SECURE_ENTRY_PATH:-}"
+
+# 安装信息回调 — 给云厂商/控制面用的"装完把凭据 POST 到 webhook"机制。
+# 安全设计参见 report.go 顶部注释:
+#   - URL 走命令行 OK(URL 不算秘密),KEY 必须走 ENV(走命令行会进
+#     /proc/<pid>/cmdline,泄到 ps、systemd journal-cmdline)
+#   - HTTPS 强制,--report-allow-http 才允许明文(测试用)
+#   - HMAC-SHA256(body, REPORT_KEY) 进 X-NexCore-Signature
+#   - 单次 POST、10s 超时、不重试,失败不影响安装
+# 用法:
+#   REPORT_KEY=secret bash <(curl ... install.sh) \
+#       --report-url=https://provider.example.com/nexcore/callback
+#   或全 ENV:
+#   REPORT_URL=https://... REPORT_KEY=secret bash <(curl ... install.sh)
+REPORT_URL_RAW="${REPORT_URL:-}"
+REPORT_KEY_RAW="${REPORT_KEY:-}"
+REPORT_ALLOW_HTTP="${REPORT_ALLOW_HTTP:-}"
 for arg in "$@"; do
     case "$arg" in
-        --force|-f)             FORCE=true ;;
-        --secure-entry)         ENABLE_SECURE_ENTRY=1 ;;
-        --secure-entry=*)       ENABLE_SECURE_ENTRY=1; SECURE_ENTRY_PATH="${arg#*=}" ;;
-        v*|V*)                  TARGET_VERSION="$arg" ;;
-        *)                      TARGET_VERSION="$arg" ;;
+        --force|-f)              FORCE=true ;;
+        --secure-entry)          ENABLE_SECURE_ENTRY=1 ;;
+        --secure-entry=*)        ENABLE_SECURE_ENTRY=1; SECURE_ENTRY_PATH="${arg#*=}" ;;
+        --report-url=*)          REPORT_URL_RAW="${arg#*=}" ;;
+        --report-allow-http)     REPORT_ALLOW_HTTP=1 ;;
+        --report-key=*)
+            # 标记成"通过 CLI 传入了 KEY"以便 helpers 加载完后告警。
+            # 不在 arg-parse 阶段直接 warn —— 此时 warn() 还没定义。
+            REPORT_KEY_RAW="${arg#*=}"
+            REPORT_KEY_VIA_CLI=1
+            ;;
+        v*|V*)                   TARGET_VERSION="$arg" ;;
+        *)                       TARGET_VERSION="$arg" ;;
     esac
 done
 
@@ -469,4 +493,45 @@ if [[ -n "${ENABLE_SECURE_ENTRY}" ]]; then
 fi
 
 show_credentials
+
+# REPORT_KEY 走 CLI 是不安全的(进 /proc/<pid>/cmdline → ps 可见),
+# arg-parse 阶段还没 warn() 可调,这里补告警。fallback 仍然接受,只
+# 是要让操作员看到一次"下次别这么干"。
+if [[ "${REPORT_KEY_VIA_CLI:-0}" = "1" ]]; then
+    warn "--report-key= 通过命令行传入会写进 /proc/<pid>/cmdline,${red}本次任务的 KEY 已经暴露给同机其他用户${plain}"
+    warn "下次请用 ${cyan}REPORT_KEY=xxx bash <(curl ...)${plain} ENV 形式传入"
+fi
+
+# 操作员开启了安装信息回调 — 把刚装好的面板 URL / 端口 / 公网 IP /
+# 安全入口 / admin 用户名密码 / API token 一次性 HMAC 签好 POST 到
+# webhook。失败用 warn 不 die — 凭据已经在 journal 里,operator 可以
+# 手补。详细安全模型见 report.go 顶部注释。
+if [[ -n "${REPORT_URL_RAW}" ]]; then
+    if [[ -z "${REPORT_KEY_RAW}" ]]; then
+        warn "提供了 ${cyan}--report-url${plain} 但没 ${cyan}REPORT_KEY${plain} — 拒绝裸 POST 明文凭据(无 HMAC 签名)"
+        warn "正确用法:${cyan}REPORT_KEY=secret bash <(curl ... install.sh) --report-url=https://...${plain}"
+    else
+        echo
+        step "推送安装信息到回调地址(HMAC-SHA256 签名)…"
+        # extract_banner_* 在 show_credentials 内部已经跑过一次,这里再
+        # 跑一次 — journal grep 是幂等的,几 ms 开销。把它们直接传给
+        # binary 子进程的 env(KEY=val cmd 语法只导出给那一条命令,
+        # 不污染当前 shell)。
+        _pwd_for_report="$(extract_banner_password)"
+        _tok_for_report="$(extract_banner_api_token)"
+        _allow_http_flag=""
+        [[ -n "${REPORT_ALLOW_HTTP}" ]] && _allow_http_flag="-allow-http"
+        if REPORT_KEY="${REPORT_KEY_RAW}" \
+           NEXCORE_REPORT_PASSWORD="${_pwd_for_report}" \
+           NEXCORE_REPORT_API_TOKEN="${_tok_for_report}" \
+           "${INSTALL_DIR}/${CMD_NAME}" report -url "${REPORT_URL_RAW}" ${_allow_http_flag}; then
+            ok "回调地址已收到凭据"
+        else
+            warn "回调推送失败 — 安装本体已成功,凭据仍在 journal:${cyan}journalctl -u ${CMD_NAME} -n 80${plain}"
+            warn "或本机查询:${cyan}${CMD_NAME} creds${plain}"
+        fi
+        unset _pwd_for_report _tok_for_report _allow_http_flag
+    fi
+fi
+
 run_doctor || true

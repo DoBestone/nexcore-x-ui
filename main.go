@@ -474,6 +474,14 @@ func main() {
 	magicCmd.StringVar(&magicNote, "note", "", "audit note (free-form)")
 	magicCmd.StringVar(&magicHost, "host", "", "panel host[:port] for the URL (auto-detect if empty)")
 
+	reportCmd := flag.NewFlagSet("report", flag.ExitOnError)
+	var reportURL string
+	var reportAllowHTTP bool
+	var reportTimeoutSec int
+	reportCmd.StringVar(&reportURL, "url", "", "callback URL (https:// required unless -allow-http)")
+	reportCmd.BoolVar(&reportAllowHTTP, "allow-http", false, "permit http:// callback (testing/LAN only)")
+	reportCmd.IntVar(&reportTimeoutSec, "timeout", 10, "POST timeout in seconds (1..120)")
+
 	settingCmd := flag.NewFlagSet("setting", flag.ExitOnError)
 	var port int
 	var username string
@@ -508,6 +516,8 @@ func main() {
 		fmt.Println("    run            run web panel")
 		fmt.Println("    v2-ui          migrate form v2-ui")
 		fmt.Println("    setting        set settings")
+		fmt.Println("    magic          mint a one-shot magic-login URL")
+		fmt.Println("    report         POST install info to a webhook (HMAC-signed)")
 	}
 
 	flag.Parse()
@@ -569,8 +579,22 @@ func main() {
 			return
 		}
 		mintMagicLink(magicTTL, magicNote, magicHost)
+	case "report":
+		if err := reportCmd.Parse(os.Args[2:]); err != nil {
+			fmt.Println(err)
+			return
+		}
+		// 钳制超时:1s 起步避免不可达发起秒级失败,120s 上限避免某个误用
+		// 让 install.sh 干等 — install 本身的耐心阈值就在那儿。
+		if reportTimeoutSec < 1 {
+			reportTimeoutSec = 1
+		}
+		if reportTimeoutSec > 120 {
+			reportTimeoutSec = 120
+		}
+		runReport(reportURL, reportAllowHTTP, time.Duration(reportTimeoutSec)*time.Second)
 	default:
-		fmt.Println("expected one of: run, v2-ui, setting, magic, -v")
+		fmt.Println("expected one of: run, v2-ui, setting, magic, report, -v")
 		fmt.Println()
 		runCmd.Usage()
 		fmt.Println()
