@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -68,6 +69,13 @@ type V1Controller struct {
 	updateService        service.UpdateService
 	blockRuleService     service.BlockRuleService
 	clientTrafficService service.ClientTrafficService
+
+	// serverStatusLast 是 /server/status 上一拍的样本,用来给当前请求
+	// 算瞬时网络速率(NetIO.Up/Down)。无前一拍 → ServerService.GetStatus
+	// 拿不出差值 → 速率永远 0,这是 v2.2.0 之前 API 返回 0 速率的根因。
+	// 跨请求共享 — gin handler 并发跑,必须 mutex。
+	serverStatusMu   sync.Mutex
+	serverStatusLast *service.Status
 }
 
 func NewV1Controller(g *gin.RouterGroup) *V1Controller {
@@ -220,8 +228,23 @@ func (a *V1Controller) health(c *gin.Context) {
 	})
 }
 
+// serverStatus 返回 CPU / 内存 / 磁盘 / 上下行速率 / TCP/UDP 连接数 /
+// 累计流量 / xray 运行状态。
+//
+// 速率(NetIO.Up/Down)需要两拍样本做差才能算出来 — 这个 handler 通过
+// serverStatusLast 在跨请求间维护前一拍。首次调用拿到 0 速率(无前
+// 一拍可减),第二次开始返回真实速率,值是"两次 API 调用之间的均值"。
+// 跨请求样本被 ServerService 内部 30s 上限丢弃,避免长间隔轮询拿到
+// "几小时均值"假装"瞬时"。
+//
+// 累计流量(NetTraffic.Sent/Recv)从首次调用就正确填充 — 业务系统如果
+// 自己想精确算特定窗口的速率,记两次累计差自己除即可,不依赖这边的速率字段。
 func (a *V1Controller) serverStatus(c *gin.Context) {
-	OK(c, a.serverService.GetStatus(nil))
+	a.serverStatusMu.Lock()
+	cur := a.serverService.GetStatus(a.serverStatusLast)
+	a.serverStatusLast = cur
+	a.serverStatusMu.Unlock()
+	OK(c, cur)
 }
 
 func (a *V1Controller) xrayStatus(c *gin.Context) {

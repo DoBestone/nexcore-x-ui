@@ -137,13 +137,26 @@ func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 		status.NetTraffic.Sent = ioStat.BytesSent
 		status.NetTraffic.Recv = ioStat.BytesRecv
 
+		// 速率 = 累计字节差 / 时间差。需要前一拍样本。
+		// 排除两种坏情况:
+		//   1. lastStatus == nil:首次采样,无差可减,速率留 0(累计字节
+		//      仍正确填充 NetTraffic.Sent/Recv,前端可自己算)。
+		//   2. lastStatus 太陈旧(> 30s):用它算出的"30 分钟均值速率"
+		//      跟"瞬时速率"语义脱节,UI 上是误导;treat 等同未采样。
+		//      30s 上限来自:面板 cron 是 @every 2s,API 调用方典型轮询
+		//      间隔 5–15s,30s 给慢轮询者留余量,再大就是聚合了。
+		//   3. 计数回卷(uint64 下溢):虚机迁移、网卡 down/up、计数器
+		//      复位都会让 current < last,直接相减会下溢成天文数字。
+		//      检测到反转就跳过这一拍,等下一拍再算。
 		if lastStatus != nil {
 			duration := now.Sub(lastStatus.T)
-			seconds := float64(duration) / float64(time.Second)
-			up := uint64(float64(status.NetTraffic.Sent-lastStatus.NetTraffic.Sent) / seconds)
-			down := uint64(float64(status.NetTraffic.Recv-lastStatus.NetTraffic.Recv) / seconds)
-			status.NetIO.Up = up
-			status.NetIO.Down = down
+			seconds := duration.Seconds()
+			if seconds > 0 && seconds <= 30 &&
+				status.NetTraffic.Sent >= lastStatus.NetTraffic.Sent &&
+				status.NetTraffic.Recv >= lastStatus.NetTraffic.Recv {
+				status.NetIO.Up = uint64(float64(status.NetTraffic.Sent-lastStatus.NetTraffic.Sent) / seconds)
+				status.NetIO.Down = uint64(float64(status.NetTraffic.Recv-lastStatus.NetTraffic.Recv) / seconds)
+			}
 		}
 	} else {
 		logger.Warning("can not find io counters")
