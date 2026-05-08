@@ -282,7 +282,7 @@ func (a *V1Controller) getInbound(c *gin.Context) {
 	if !ok {
 		return
 	}
-	item, err := a.inboundService.GetInbound(id)
+	item, err := a.inboundService.GetInboundCtx(c.Request.Context(), id)
 	if err != nil {
 		NotFound(c, "inbound_not_found", err.Error())
 		return
@@ -360,7 +360,7 @@ func (a *V1Controller) resetInboundTraffic(c *gin.Context) {
 }
 
 func (a *V1Controller) dbTraffic(c *gin.Context) {
-	items, err := a.inboundService.GetAllInbounds()
+	items, err := a.inboundService.GetAllInboundsCtx(c.Request.Context())
 	if err != nil {
 		Internal(c, "db_error", err)
 		return
@@ -1101,7 +1101,7 @@ func (a *V1Controller) inboundLinks(c *gin.Context) {
 		BadRequest(c, "invalid_host", reason)
 		return
 	}
-	links, err := a.shareService.LinksForInbound(id, host)
+	links, err := a.shareService.LinksForInboundCtx(c.Request.Context(), id, host)
 	if err != nil {
 		BadRequest(c, mapClientErr(err), err.Error())
 		return
@@ -1119,7 +1119,7 @@ func (a *V1Controller) subscriptionOne(c *gin.Context) {
 		BadRequest(c, "invalid_host", reason)
 		return
 	}
-	sub, err := a.shareService.SubscriptionForInbound(id, host)
+	sub, err := a.shareService.SubscriptionForInboundCtx(c.Request.Context(), id, host)
 	if err != nil {
 		BadRequest(c, mapClientErr(err), err.Error())
 		return
@@ -1134,7 +1134,7 @@ func (a *V1Controller) subscriptionAll(c *gin.Context) {
 		BadRequest(c, "invalid_host", reason)
 		return
 	}
-	sub, err := a.shareService.SubscriptionForAll(host)
+	sub, err := a.shareService.SubscriptionForAllCtx(c.Request.Context(), host)
 	if err != nil {
 		Internal(c, "subscription_failed", err)
 		return

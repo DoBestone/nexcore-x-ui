@@ -3,8 +3,11 @@ package web
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"embed"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"io/fs"
 	"mime"
@@ -17,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"nexcore-x-ui/config"
 	"nexcore-x-ui/database"
@@ -93,7 +97,12 @@ func configureTrustedProxies(engine *gin.Engine) error {
 // inline <style>; tightening that requires a frontend rewrite. We do
 // forbid object/embed sources and frame-ancestors entirely, which
 // covers the most common XSS payload styles without breaking the UI.
-func securityHeadersMiddleware() gin.HandlerFunc {
+//
+// `tlsEnabled` controls whether HSTS is emitted. Setting HSTS over a
+// plain-HTTP listener would cause the operator's browser to refuse a
+// future cleartext fallback (e.g. after a cert expires) — we only
+// announce it when the panel itself is actually serving TLS.
+func securityHeadersMiddleware(tlsEnabled bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		h := c.Writer.Header()
 		// Pre-set so handlers that send their own Content-Type still
@@ -101,6 +110,13 @@ func securityHeadersMiddleware() gin.HandlerFunc {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
+		if tlsEnabled {
+			// 1 year, includeSubDomains. No `preload` — that requires
+			// submission to the browser preload list and is a one-way
+			// commitment we shouldn't make on the operator's behalf.
+			h.Set("Strict-Transport-Security",
+				"max-age=31536000; includeSubDomains")
+		}
 		h.Set("Permissions-Policy",
 			"accelerometer=(), camera=(), geolocation=(), gyroscope=(), "+
 				"magnetometer=(), microphone=(), payment=(), usb=()")
@@ -581,8 +597,15 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	// per-group middleware reads the body.
 	engine.Use(limitBodyMiddleware())
 	// Security headers also live at the root so HTML pages, JSON
-	// responses, and static assets all get them.
-	engine.Use(securityHeadersMiddleware())
+	// responses, and static assets all get them. Resolve tlsEnabled here
+	// (not later at listener wiring) so the HSTS header is gated by the
+	// panel's actual transport — emitting HSTS over plain HTTP would lock
+	// the operator's browser into a scheme the server can't actually
+	// serve.
+	headerCertFile, _ := s.settingService.GetCertFile()
+	headerKeyFile, _ := s.settingService.GetKeyFile()
+	headerTLSEnabled := headerCertFile != "" && headerKeyFile != ""
+	engine.Use(securityHeadersMiddleware(headerTLSEnabled))
 
 	secret, err := s.settingService.GetSecret()
 	if err != nil {
@@ -821,9 +844,103 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	// /panel-login/consume is the only HTTP entry point that ever sees
 	// the plaintext, and only as a POST body — so it's never in any URL
 	// that gets logged.
-	g.POST("panel-login/consume", s.handleMagicConsume)
+	g.POST("panel-login/consume", s.magicConsumeThrottle, s.handleMagicConsume)
 
 	return engine, nil
+}
+
+// apiTokenFingerprint produces a short, log-safe identifier for a plaintext
+// API token. Format: "<first-4-of-plain>-<first-8-of-sha256>". 4 plaintext
+// characters from a 48-character [0-9A-Za-z] token are 24 bits — far too
+// short to brute-force into the full secret (the remaining 44 chars give
+// 262 bits of entropy), but enough for an operator to visually compare
+// "the token I see in the panel" against "the line in this morning's log".
+// The sha256 prefix matches the index column used by token.go's
+// FindActiveByValue, which makes log-to-database lookups trivial.
+func apiTokenFingerprint(token string) string {
+	prefix := token
+	if len(prefix) > 4 {
+		prefix = prefix[:4]
+	}
+	sum := sha256.Sum256([]byte(token))
+	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(sum[:4]))
+}
+
+// magicConsumeThrottle limits magic-token brute force on /panel-login/consume.
+// The login form has its own IP/username throttler in controller/index.go,
+// but the magic-link consume endpoint doesn't go through it — without this
+// gate an attacker can hammer the endpoint at unrestricted QPS trying to
+// guess a live token's plaintext (40 chars from [0-9A-Za-z], so the search
+// space is enormous; the bound is here purely as a safety net so a misissued
+// short-lived token can't be enumerated by sustained guessing).
+//
+// Process-local state, IP-keyed: 7 failures / 10 min mirrors loginThrottle.
+// Multi-node deployments should front the panel with a real WAF.
+var magicConsumeFailures = struct {
+	mu       sync.Mutex
+	attempts map[string]*magicAttempt
+}{
+	attempts: map[string]*magicAttempt{},
+}
+
+type magicAttempt struct {
+	count      int
+	firstAt    time.Time
+	blockUntil time.Time
+}
+
+const magicConsumeThreshold = 7
+const magicConsumeWindow = 10 * time.Minute
+
+func magicConsumeRetryAfter(ip string) int {
+	magicConsumeFailures.mu.Lock()
+	defer magicConsumeFailures.mu.Unlock()
+	r, ok := magicConsumeFailures.attempts[ip]
+	if !ok {
+		return 0
+	}
+	now := time.Now()
+	if now.Before(r.blockUntil) {
+		return int(r.blockUntil.Sub(now).Seconds()) + 1
+	}
+	return 0
+}
+
+func magicConsumeRecordFailure(ip string) {
+	magicConsumeFailures.mu.Lock()
+	defer magicConsumeFailures.mu.Unlock()
+	now := time.Now()
+	r, ok := magicConsumeFailures.attempts[ip]
+	if !ok || now.Sub(r.firstAt) > magicConsumeWindow {
+		magicConsumeFailures.attempts[ip] = &magicAttempt{count: 1, firstAt: now}
+		return
+	}
+	r.count++
+	if r.count >= magicConsumeThreshold {
+		r.blockUntil = now.Add(magicConsumeWindow)
+	}
+}
+
+func (s *Server) magicConsumeThrottle(c *gin.Context) {
+	// Use direct peer IP, not c.ClientIP(): trusted-proxy config gates
+	// X-Forwarded-For at the engine level, so c.ClientIP() already does
+	// the right thing in both bare and behind-proxy deployments.
+	ip := c.ClientIP()
+	if wait := magicConsumeRetryAfter(ip); wait > 0 {
+		c.Header("Retry-After", time.Duration(wait*int(time.Second)).String())
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"success": false,
+			"msg":     "too many attempts",
+		})
+		return
+	}
+	c.Next()
+	// Log failure after the handler ran. handleMagicConsume aborts with
+	// 401 on every failure mode (bad token, expired, no admin user); we
+	// count any non-2xx response as a failed attempt.
+	if c.Writer.Status() >= 400 {
+		magicConsumeRecordFailure(ip)
+	}
 }
 
 // handleMagicConsume validates a magic token POSTed by the SPA and
@@ -909,7 +1026,16 @@ func (s *Server) initI18n(engine *gin.Engine) error {
 		return names
 	}
 
-	var localizer *i18n.Localizer
+	// 注意:i18n 模板函数不再读取一个共享变量,改用 atomic.Pointer 暴露
+	// "默认 localizer" — 历史上这里是 `var localizer *i18n.Localizer`,被
+	// 中间件按请求覆写,而 engine.FuncMap["i18n"] 又在另一个 goroutine 里
+	// 读它。两个并发请求会让 localizer 变量在赋值/读取间形成数据竞争,
+	// 渲染时拿到的可能不是当前请求的 Accept-Language 对应语言。
+	//
+	// 当前 Vue SPA 不再走 c.HTML 渲染路径,FuncMap 实质处于沉睡状态;
+	// 但保留该函数定义,用 atomic 修复防御性问题,避免未来某天 reintroduce
+	// 服务端模板时埋下回归。
+	var defaultLocalizer atomic.Pointer[i18n.Localizer]
 
 	engine.FuncMap["i18n"] = func(key string, params ...string) (string, error) {
 		names := findI18nParamNames(key)
@@ -920,7 +1046,12 @@ func (s *Server) initI18n(engine *gin.Engine) error {
 		for i := range names {
 			templateData[names[i]] = params[i]
 		}
-		return localizer.Localize(&i18n.LocalizeConfig{
+		l := defaultLocalizer.Load()
+		if l == nil {
+			// 首请求未到达前,fallback 到 bundle 默认 tag。
+			l = i18n.NewLocalizer(bundle)
+		}
+		return l.Localize(&i18n.LocalizeConfig{
 			MessageID:    key,
 			TemplateData: templateData,
 		})
@@ -956,8 +1087,11 @@ func (s *Server) initI18n(engine *gin.Engine) error {
 			localizerCache[accept] = l
 		}
 		localizerCacheMu.Unlock()
-		localizer = l
-		c.Set("localizer", localizer)
+		// 把"最近一次中间件看到的 localizer"作为默认值对外暴露 — 仅供
+		// 完全不带 *gin.Context 调用 i18n FuncMap 的场景兜底。正确做法
+		// 仍是 c.MustGet("localizer").(*i18n.Localizer) 拿到当前请求的。
+		defaultLocalizer.Store(l)
+		c.Set("localizer", l)
 		c.Next()
 	})
 
@@ -1037,7 +1171,20 @@ func (s *Server) Start() (err error) {
 	if token, generated, terr := s.settingService.EnsureAPIToken(); terr != nil {
 		logger.Warning("ensure api token failed:", terr)
 	} else if generated {
-		logger.Infof("API token generated (record now, will not be shown again): %s", token)
+		// Don't log the plaintext token. systemd journal / container logs /
+		// CI log archives all retain the line indefinitely, and a leaked
+		// plaintext API token is a one-shot panel takeover.
+		//
+		// Log a short fingerprint so the operator can correlate this boot
+		// with a value they later read out of the panel's API-token page,
+		// but never enough bytes to reconstruct the secret. Layout:
+		//   - first 4 chars of plaintext (eyeball-friendly identifier)
+		//   - sha256 prefix (matches the index used in token.go)
+		// The full token is recoverable from the panel UI ("API 设置")
+		// by the logged-in admin; cron-driven rotation is the recommended
+		// flow rather than scraping it from logs.
+		fp := apiTokenFingerprint(token)
+		logger.Infof("API token generated; fingerprint=%s — view full value in panel API settings", fp)
 	}
 
 	engine, err := s.initRouter()

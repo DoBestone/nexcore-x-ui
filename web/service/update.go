@@ -34,10 +34,20 @@ const maxChecksumsSize = 64 * 1024
 // doesn't match the value in checksums.txt for that asset.
 var ErrChecksumMismatch = errors.New("update: tarball checksum mismatch")
 
-// ErrChecksumMissing is returned when checksums.txt is missing from the
-// release or doesn't contain an entry for the asset we downloaded. We
-// fail closed: a release without checksums is treated as untrusted.
+// ErrChecksumMissing is returned when the release or doesn't contain an
+// entry for the asset we downloaded. We fail closed: a release without
+// checksums is treated as untrusted.
 var ErrChecksumMissing = errors.New("update: release has no checksums.txt entry for this asset")
+
+// checksumsClient is used for the small (≤64KB) checksums.txt download.
+// Bounded so a stalled GitHub CDN can't park an update job for hours.
+var checksumsClient = &http.Client{Timeout: 30 * time.Second}
+
+// artifactClient is used for the actual release tarball download (≤256MB).
+// 10min ceiling clears legitimate downloads on a slow link while still
+// failing fast if the connection wedges. The earlier API metadata GET (
+// updateMetaClient) uses a tighter 30s budget.
+var artifactClient = &http.Client{Timeout: 10 * time.Minute}
 
 // updateCheckCacheTTL avoids hammering the GitHub API every time the dashboard
 // mounts. 5 minutes is long enough to keep panel navigation snappy and short
@@ -322,7 +332,7 @@ func verifyTarballChecksum(r *ReleaseInfo, assetName, tarballPath string) error 
 		return ErrChecksumMissing
 	}
 
-	resp, err := http.Get(checksumsURL)
+	resp, err := checksumsClient.Get(checksumsURL)
 	if err != nil {
 		return fmt.Errorf("fetch checksums.txt: %w", err)
 	}
@@ -429,7 +439,7 @@ func repoCoordinates() (owner, repo string) {
 }
 
 func downloadFile(url, dst string) error {
-	resp, err := http.Get(url)
+	resp, err := artifactClient.Get(url)
 	if err != nil {
 		return err
 	}

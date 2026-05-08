@@ -12,7 +12,6 @@ import (
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
 	"io"
-	"io/fs"
 	"net/http"
 	"os"
 	"runtime"
@@ -179,7 +178,13 @@ func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 
 func (s *ServerService) GetXrayVersions() ([]string, error) {
 	url := "https://api.github.com/repos/XTLS/Xray-core/releases"
-	resp, err := http.Get(url)
+	// 30s ceiling: api.github.com is normally <500ms; anything past 30s
+	// is GitHub broken / network broken, in which case there is no point
+	// holding the request goroutine for the panel's WriteTimeout (120s).
+	// Without this, a soft outage of api.github.com made the whole "新版本
+	// 检查" UI hang for two minutes per click.
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -222,14 +227,26 @@ func (s *ServerService) downloadXRay(version string) (string, error) {
 
 	fileName := fmt.Sprintf("Xray-%s-%s.zip", osName, arch)
 	url := fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/download/%s/%s", version, fileName)
-	resp, err := http.Get(url)
+	// 5min ceiling: a release zip is ~30MB; on a 1Mbps link that's ~4min.
+	// We don't want to be unbounded (a stalled GitHub CDN holds the panel's
+	// upgrade-in-progress state forever) but the floor has to clear normal
+	// downloads on a slow VPS.
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(url)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
 	os.Remove(fileName)
-	file, err := os.Create(fileName)
+	// 0o600: only the panel user can read the downloaded archive while it's
+	// on disk. Default os.Create uses 0o666 which (after typical umask 022)
+	// is world-readable — on a shared host a local user could read the
+	// fresh download, and worse, race against the extraction by overwriting
+	// the still-open file before we hash it. The archive is deleted right
+	// after extraction (defer above), but the window is enough for an
+	// attacker with shell access to swap in a malicious payload.
+	file, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return "", err
 	}
@@ -281,7 +298,16 @@ func (s *ServerService) UpdateXray(version string) error {
 			return err
 		}
 		os.Remove(fileName)
-		file, err := os.OpenFile(fileName, os.O_CREATE|os.O_RDWR|os.O_TRUNC, fs.ModePerm)
+		// 0o700 (owner rwx only) instead of fs.ModePerm (0o777). The
+		// extracted artifacts are: the xray executable (must be +x for
+		// the panel user) and the geoip/geosite data files. On a shared
+		// host, 0o777 lets any local user overwrite the xray binary
+		// between this write and the panel's RestartXray call —
+		// privilege escalation if the panel runs as root. xray/process.go
+		// preflightBinary still rejects world-writable binaries, but it
+		// is cheaper to never write them world-writable in the first
+		// place than to rely on a post-hoc TOCTOU check.
+		file, err := os.OpenFile(fileName, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o700)
 		if err != nil {
 			return err
 		}

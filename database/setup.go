@@ -157,6 +157,40 @@ func RemoveInstallInfo() {
 	_ = os.Remove(fp)
 }
 
+// installInfoMaxAge is the soft TTL of install-info.txt. The file is
+// 0600 and only contains the *initial* admin credentials, but operators
+// frequently forget to delete it; on a long-lived host the cleartext
+// password lingers in the panel's data directory indefinitely. After
+// the TTL elapses we delete the file on the next boot — by then the
+// admin has either logged in (in which case they know the password) or
+// the panel is unattended and a stale file is more dangerous than
+// helpful.
+//
+// 24h is a deliberate compromise: long enough that an operator can run
+// the installer, walk away, come back the next morning, and still find
+// their initial credentials; short enough that "I'll deal with it later"
+// doesn't turn into "still there a year later".
+const installInfoMaxAge = 24 * time.Hour
+
+// MaybeExpireInstallInfo deletes install-info.txt if it is older than
+// installInfoMaxAge. Called once at startup right after first-run setup.
+// Quietly does nothing if the file is missing, fresh, or unreadable —
+// the file is best-effort to begin with.
+func MaybeExpireInstallInfo(dbPath string) {
+	if dbPath == "" {
+		return
+	}
+	fp := path.Join(path.Dir(dbPath), installInfoFilename)
+	info, err := os.Stat(fp)
+	if err != nil {
+		return
+	}
+	if time.Since(info.ModTime()) < installInfoMaxAge {
+		return
+	}
+	_ = os.Remove(fp)
+}
+
 // PreserveFirstRunInfoOnce reads install-info.txt back so a tool like the
 // install.sh wrapper can echo the credentials after the binary started.
 // Returns nil, nil when the file does not exist.

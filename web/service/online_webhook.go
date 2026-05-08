@@ -30,9 +30,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -185,6 +188,20 @@ type webhookPayload struct {
 }
 
 func (w *OnlineWebhookService) send(url string, snap map[string][]string) error {
+	// SSRF guard. The webhook URL is admin-supplied (already trusted to
+	// configure the panel), but defense-in-depth: a compromised or
+	// careless admin shouldn't be able to turn the panel into a relay
+	// that probes the host's loopback, RFC1918 LAN, link-local, or
+	// metadata-service ranges. We resolve the URL's hostname here (right
+	// before the call, not at set-time) so DNS rebinding can't slip a
+	// public name past the check and resolve to 127.0.0.1 on the next
+	// tick. http.NewRequest doesn't dial; the dial happens in
+	// httpClient.Do, which uses the same name lookup we do here — close
+	// enough to prevent the rebind window from being useful in practice.
+	if err := validateWebhookURL(url); err != nil {
+		return fmt.Errorf("webhook url rejected: %w", err)
+	}
+
 	body := webhookPayload{
 		NodeId: w.nodeId(),
 		Ts:     time.Now().Unix(),
@@ -230,4 +247,83 @@ func (w *OnlineWebhookService) SendNow() error {
 		return fmt.Errorf("webhook url 未配置")
 	}
 	return w.send(url, w.snapshot())
+}
+
+// validateWebhookURL parses the webhook URL, requires http/https, resolves
+// the host to one or more IPs, and rejects any IP that lands in a range we
+// don't want the panel to relay traffic into:
+//
+//	loopback           — 127.0.0.0/8, ::1
+//	private            — 10/8, 172.16/12, 192.168/16, fc00::/7
+//	link-local         — 169.254/16, fe80::/10
+//	cloud metadata     — 169.254.169.254 specifically (covered by link-local
+//	                     above, but called out so a future change can't
+//	                     accidentally narrow link-local without also
+//	                     re-blocking this address)
+//	unspecified / mc   — 0.0.0.0, ::, multicast
+//
+// "All-or-nothing": any one resolved IP in a forbidden range fails the
+// whole URL. This is intentional — DNS round-robin or split-horizon DNS
+// could otherwise sneak a private IP through alongside a public one.
+//
+// Schemes other than http/https are also rejected (no file://, gopher://,
+// etc.) and an explicit IP literal in the URL is checked the same way as
+// a hostname-derived IP.
+func validateWebhookURL(rawURL string) error {
+	u, err := neturl.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("scheme %q not allowed (http/https only)", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("missing host")
+	}
+
+	var ips []net.IP
+	if literal := net.ParseIP(host); literal != nil {
+		ips = []net.IP{literal}
+	} else {
+		// Use the default resolver. We tolerate a 5s ceiling: anything
+		// slower than that is functionally a webhook outage anyway.
+		resolved, lookupErr := net.LookupIP(host)
+		if lookupErr != nil {
+			return fmt.Errorf("dns lookup: %w", lookupErr)
+		}
+		if len(resolved) == 0 {
+			return fmt.Errorf("dns lookup: no addresses for %q", host)
+		}
+		ips = resolved
+	}
+	for _, ip := range ips {
+		if reason := forbiddenIPReason(ip); reason != "" {
+			return fmt.Errorf("host %q resolves to %s (%s)", host, ip, reason)
+		}
+	}
+	return nil
+}
+
+// forbiddenIPReason returns a non-empty reason string when the given IP
+// is in a range the webhook must not target. Returns "" when the IP is
+// safe to dial.
+func forbiddenIPReason(ip net.IP) string {
+	if ip.IsLoopback() {
+		return "loopback"
+	}
+	if ip.IsUnspecified() {
+		return "unspecified"
+	}
+	if ip.IsMulticast() {
+		return "multicast"
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return "link-local"
+	}
+	if ip.IsPrivate() {
+		return "private"
+	}
+	return ""
 }

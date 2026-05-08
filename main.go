@@ -58,6 +58,11 @@ func runWebServer() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// Sweep an aged install-info.txt before deciding whether first-run
+	// setup needs to print fresh credentials. If the file has lived past
+	// installInfoMaxAge from the previous install it is removed here so
+	// it can't keep showing stale plaintext to anyone with shell access.
+	database.MaybeExpireInstallInfo(config.GetDBPath())
 	if info, err := database.RunFirstRunSetup(config.GetDBPath()); err != nil {
 		logger.Warning("first-run setup failed:", err)
 	} else if info.Generated {

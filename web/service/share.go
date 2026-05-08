@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -100,7 +101,13 @@ func (s *ShareService) remarkPrefix(in *model.Inbound) string {
 // Returns ErrUnsupportedProtocol for protocols we cannot render (Dokodemo,
 // HTTP relay etc.).
 func (s *ShareService) LinksForInbound(inboundID int, host string) ([]string, error) {
-	in, err := s.inboundService.GetInbound(inboundID)
+	return s.LinksForInboundCtx(context.Background(), inboundID, host)
+}
+
+// LinksForInboundCtx is the context-aware variant used by HTTP handlers
+// so a client disconnect cancels the underlying SQLite read.
+func (s *ShareService) LinksForInboundCtx(ctx context.Context, inboundID int, host string) ([]string, error) {
+	in, err := s.inboundService.GetInboundCtx(ctx, inboundID)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +188,15 @@ func (s *ShareService) linksForLoadedInbound(in *model.Inbound, host string) ([]
 // DB 入口 + 纯计算分开:测试和 SubscriptionForAll-style 已加载场景都能
 // 直接调 linksByEmailFromLoadedInbound 而不需要 mock InboundService。
 func (s *ShareService) LinksByEmail(inboundID int, host string) (map[string]string, error) {
-	in, err := s.inboundService.GetInbound(inboundID)
+	return s.LinksByEmailCtx(context.Background(), inboundID, host)
+}
+
+// LinksByEmailCtx is the context-aware variant. The QR-modal path on
+// the panel calls this on every "show QR" click; on a busy SQLite the
+// cancellation signal is what keeps a closed modal from holding the
+// read lock for the rest of the query.
+func (s *ShareService) LinksByEmailCtx(ctx context.Context, inboundID int, host string) (map[string]string, error) {
+	in, err := s.inboundService.GetInboundCtx(ctx, inboundID)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +258,12 @@ func (s *ShareService) linksByEmailFromLoadedInbound(in *model.Inbound, host str
 // SubscriptionForInbound returns a base64-encoded blob of all share links —
 // the format consumed by every standard proxy client (V2RayN, Shadowrocket).
 func (s *ShareService) SubscriptionForInbound(inboundID int, host string) (string, error) {
-	links, err := s.LinksForInbound(inboundID, host)
+	return s.SubscriptionForInboundCtx(context.Background(), inboundID, host)
+}
+
+// SubscriptionForInboundCtx is the context-aware variant.
+func (s *ShareService) SubscriptionForInboundCtx(ctx context.Context, inboundID int, host string) (string, error) {
+	links, err := s.LinksForInboundCtx(ctx, inboundID, host)
 	if err != nil {
 		return "", err
 	}
@@ -259,7 +279,14 @@ func (s *ShareService) SubscriptionForInbound(inboundID int, host string) (strin
 // per row. For a panel with N enabled inbounds this collapses 2N+1 DB
 // calls into 1 — measurable on a 50-inbound deployment.
 func (s *ShareService) SubscriptionForAll(host string) (string, error) {
-	items, err := s.inboundService.GetAllInbounds()
+	return s.SubscriptionForAllCtx(context.Background(), host)
+}
+
+// SubscriptionForAllCtx is the context-aware variant. The /sub endpoint
+// is the most expensive subscription path — full inbound table scan plus
+// per-row link encoding — so propagating cancellation matters most here.
+func (s *ShareService) SubscriptionForAllCtx(ctx context.Context, host string) (string, error) {
+	items, err := s.inboundService.GetAllInboundsCtx(ctx)
 	if err != nil {
 		return "", err
 	}

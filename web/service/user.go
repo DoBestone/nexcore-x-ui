@@ -13,6 +13,16 @@ import (
 type UserService struct {
 }
 
+// dummyBcryptHash is a fixed bcrypt hash of an unguessable random string
+// at the same cost factor we use for real passwords. CheckUser runs it
+// through bcrypt.CompareHashAndPassword whenever the username row is
+// missing so the success and failure paths spend the same ~150ms,
+// closing the username-enumeration timing oracle that leaks valid logins
+// to anyone who can measure server response time. The hash itself
+// matches no plaintext anyone can submit (60-byte random input) — even
+// an attacker who learns this constant cannot forge a login with it.
+const dummyBcryptHash = "$2a$12$FLbwb6C.Cs7Q6SIaqRZzGOPkyN7WcJvF4K/9Gii/GNounkpnmmqMq"
+
 func (s *UserService) GetFirstUser() (*model.User, error) {
 	db := database.GetDB()
 
@@ -35,6 +45,12 @@ func (s *UserService) CheckUser(username string, password string) *model.User {
 		First(user).
 		Error
 	if err == gorm.ErrRecordNotFound {
+		// Constant-time guard: spend the same bcrypt budget on a
+		// missing-user response as on a present-but-wrong-password
+		// response. Without this, a SELECT-miss returns in microseconds
+		// while a hit costs ~150ms (cost-12 bcrypt verify), and any
+		// attacker who can time the panel learns which usernames exist.
+		_, _ = crypto.VerifyPassword(dummyBcryptHash, password)
 		return nil
 	} else if err != nil {
 		logger.Warning("check user err:", err)

@@ -36,13 +36,18 @@ func (s *XrayService) GetXrayErr() error {
 }
 
 func (s *XrayService) GetXrayResult() string {
+	// Same `lock` that guards p / result mutations in RestartXray and
+	// StopXray. Without holding it here, a concurrent restart can be
+	// halfway through `result = ""` (line ~337) while this reader
+	// returns the partially-cleared string, or a reader can call
+	// p.GetResult() against a *xray.Process that the restart goroutine
+	// has just swapped out.
+	lock.Lock()
+	defer lock.Unlock()
 	if result != "" {
 		return result
 	}
-	if s.IsXrayRunning() {
-		return ""
-	}
-	if p == nil {
+	if p == nil || p.IsRunning() {
 		return ""
 	}
 	result = p.GetResult()

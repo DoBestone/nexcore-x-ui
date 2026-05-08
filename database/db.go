@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"os"
 	"path"
 	"strings"
@@ -140,6 +141,28 @@ func InitDB(dbPath string) error {
 
 func GetDB() *gorm.DB {
 	return db
+}
+
+// WithCtx returns a gorm session bound to ctx so the underlying SQLite
+// query is cancelable. Use it from HTTP handlers (pass c.Request.Context())
+// and from cron-triggered work that already has a cancellation context.
+//
+// Background reads / cron jobs that don't have a useful context can keep
+// using GetDB() — context propagation is opt-in, not mandatory; partial
+// adoption is fine.
+//
+// Why the helper exists at all: GORM's WithContext takes a *gorm.DB, so
+// the call site has to know to start with database.GetDB().WithContext(ctx).
+// Centralizing the entry point lets future changes (per-request statement
+// timeout, query labelling) hook in one place.
+func WithCtx(ctx context.Context) *gorm.DB {
+	if db == nil {
+		return nil
+	}
+	if ctx == nil {
+		return db
+	}
+	return db.WithContext(ctx)
 }
 
 func IsNotFound(err error) bool {

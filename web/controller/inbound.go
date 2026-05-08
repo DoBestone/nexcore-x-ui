@@ -49,7 +49,9 @@ func (a *InboundController) startTask() {
 
 func (a *InboundController) getInbounds(c *gin.Context) {
 	user := session.GetLoginUser(c)
-	inbounds, err := a.inboundService.GetInbounds(user.Id)
+	// Pass the request context so a client disconnect cancels the SQLite
+	// query — see service.GetInboundsCtx for the rationale.
+	inbounds, err := a.inboundService.GetInboundsCtx(c.Request.Context(), user.Id)
 	if err != nil {
 		jsonMsg(c, "获取", err)
 		return

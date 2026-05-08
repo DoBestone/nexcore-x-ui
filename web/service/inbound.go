@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -169,8 +170,22 @@ func (s *InboundService) dryRunWithReplacement(replace *model.Inbound, removeId 
 	return GetXrayServiceForDryRun().DryRunInbounds(candidate)
 }
 
+// GetInbounds returns the inbounds owned by the user. Background-context
+// variant kept for cron / startup / migration callers; HTTP handlers
+// should prefer GetInboundsCtx so a client disconnect cancels the SQLite
+// query instead of running it to completion.
 func (s *InboundService) GetInbounds(userId int) ([]*model.Inbound, error) {
-	db := database.GetDB()
+	return s.GetInboundsCtx(context.Background(), userId)
+}
+
+// GetInboundsCtx is the context-aware variant. The list-inbound HTTP
+// endpoint can be called by an admin who hits Cmd-R during a slow query
+// (large clients[] join, thousands of rows) — without context propagation
+// the SQLite query continues to completion against the now-disconnected
+// client, holding the single SQLite write lock and starving concurrent
+// requests.
+func (s *InboundService) GetInboundsCtx(ctx context.Context, userId int) ([]*model.Inbound, error) {
+	db := database.WithCtx(ctx)
 	var inbounds []*model.Inbound
 	err := db.Model(model.Inbound{}).Where("user_id = ?", userId).Find(&inbounds).Error
 	if err != nil && err != gorm.ErrRecordNotFound {
@@ -180,7 +195,15 @@ func (s *InboundService) GetInbounds(userId int) ([]*model.Inbound, error) {
 }
 
 func (s *InboundService) GetAllInbounds() ([]*model.Inbound, error) {
-	db := database.GetDB()
+	return s.GetAllInboundsCtx(context.Background())
+}
+
+// GetAllInboundsCtx is the context-aware variant. Used by share-link
+// generation (subscription endpoints) and by any HTTP handler that
+// enumerates every inbound — the table can grow into the thousands on
+// busy nodes and a cancellation signal needs to reach the SQLite scan.
+func (s *InboundService) GetAllInboundsCtx(ctx context.Context) ([]*model.Inbound, error) {
+	db := database.WithCtx(ctx)
 	var inbounds []*model.Inbound
 	err := db.Model(model.Inbound{}).Find(&inbounds).Error
 	if err != nil && err != gorm.ErrRecordNotFound {
@@ -389,7 +412,15 @@ func (s *InboundService) DeleteAll() (int64, error) {
 }
 
 func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {
-	db := database.GetDB()
+	return s.GetInboundCtx(context.Background(), id)
+}
+
+// GetInboundCtx is the context-aware variant. Single-row reads are fast,
+// but they still hold the SQLite read lock; cancelling on client
+// disconnect is a small but real win on a 1C1G VPS where the upstream
+// share / link endpoint is otherwise serialised.
+func (s *InboundService) GetInboundCtx(ctx context.Context, id int) (*model.Inbound, error) {
+	db := database.WithCtx(ctx)
 	inbound := &model.Inbound{}
 	err := db.Model(model.Inbound{}).First(inbound, id).Error
 	if err != nil {

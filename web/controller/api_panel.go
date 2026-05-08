@@ -400,7 +400,7 @@ func (a *APIPanelController) inboundLinks(c *gin.Context) {
 		jsonObj(c, nil, errors.New("invalid host: "+reason))
 		return
 	}
-	links, err := a.shareService.LinksByEmail(id, cleaned)
+	links, err := a.shareService.LinksByEmailCtx(c.Request.Context(), id, cleaned)
 	if err != nil {
 		jsonObj(c, nil, err)
 		return
