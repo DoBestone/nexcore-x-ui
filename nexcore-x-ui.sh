@@ -162,8 +162,22 @@ cmd_update() {
         [[ -n "${keep}" ]] && cp "${keep}.bak" "${INSTALL_DIR}/bin/config.json" 2>/dev/null || true
     fi
 
-    # systemd unit:仅当 release 中的 .service 文件 与 当前 已不同时才覆盖,
-    # 并且备份旧的(保留任何 Environment= 等手动调整)。日常 update 不动它。
+    # systemd unit:仅当 release 中的 .service 文件 与 已安装的 不同 才覆盖。
+    # 旧策略是"日常 update 永不动它",但这导致 v2.1.2 修 SystemCallFilter SIGSYS
+    # bug 没法走 update 路径下发,操作员卡在 core-dump unit 上必须 reinstall。
+    # drop-in 文件(${SERVICE_FILE}.d/*)仍是操作员的定制面,绝不被本流程覆写;
+    # 只刷父 unit,顺手备份旧版本到 .bak.<timestamp> 方便回滚。
+    local new_unit="${tmp}/${CMD_NAME}/${CMD_NAME}.service"
+    if [[ -f "${new_unit}" ]] && ! diff -q "${new_unit}" "${SERVICE_FILE}" >/dev/null 2>&1; then
+        info "更新 systemd unit 文件 (备份旧版本)"
+        cp -a "${SERVICE_FILE}" "${SERVICE_FILE}.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+        install -m 0644 "${new_unit}" "${SERVICE_FILE}"
+        systemctl daemon-reload
+        # 清掉 SIGSYS 死循环留下的 start-limit 计数,否则 systemctl start 可能
+        # 继续报"start-limit-hit"拒绝再起。
+        systemctl reset-failed "${SERVICE_NAME}" 2>/dev/null || true
+    fi
+
     info "启动服务"
     systemctl start "${SERVICE_NAME}"
     sleep 1
@@ -467,6 +481,24 @@ cmd_doctor() {
     _check "active"        "${SERVICE_NAME} 正在运行"          "未运行" "systemctl is-active --quiet ${SERVICE_NAME}"
     _check "enabled"       "开机自启"                          "未启用" "systemctl is-enabled --quiet ${SERVICE_NAME}"
 
+    # SIGSYS / core-dump 模式检测 — v2.1.2 之前的 unit 文件里的负向 SystemCallFilter
+    # 会在 Go 1.26 runtime 第一次跑 clone3/prlimit64 时 SIGSYS-kill 进程,
+    # 操作员看到的现象是"is-active 显示 activating(auto-restart),core-dump"。
+    # 这条检查把根因点出来,而不是让人在 200 行 journal 里找。
+    local exec_status sub_state
+    exec_status=$(systemctl show -p ExecMainStatus --value "${SERVICE_NAME}" 2>/dev/null || echo "")
+    sub_state=$(systemctl show -p SubState --value "${SERVICE_NAME}" 2>/dev/null || echo "")
+    if [[ "${sub_state}" == "auto-restart" ]] || [[ "${sub_state}" == "failed" ]]; then
+        if journalctl -u "${SERVICE_NAME}" --no-pager -n 50 2>/dev/null \
+                | grep -qE 'signal=SYS|seccomp|operation not permitted.*clone'; then
+            err "检测到 SIGSYS / seccomp 阻塞 — systemd unit 的 SystemCallFilter 太严"
+            echo -e "    ${C}修复:${N} 升级到 v2.1.2+(unit 文件已修);或手动编辑 ${SERVICE_FILE}"
+            echo -e "          删除 ${C}SystemCallFilter=~...${N} 那一行,加 ${C}SystemCallErrorNumber=EPERM${N}"
+            echo -e "          然后 ${C}systemctl daemon-reload && systemctl reset-failed ${SERVICE_NAME} && systemctl start ${SERVICE_NAME}${N}"
+            fail=$((fail+1))
+        fi
+    fi
+
     local p; p="$(panel_port)"
     if [[ -n "${p}" ]] && (ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null) | grep -q ":${p} "; then
         ok "panel port ${p} 在监听"
@@ -480,9 +512,25 @@ cmd_doctor() {
         err "/api/v1/health 不通"; fail=$((fail+1))
     fi
 
+    # admin 用户检查 — 单独一行而不是埋在 health 检查里。
+    # 这个失败模式("port 在听 / health 200 / 但 users 表空")在 v2.1.0/2.1.1
+    # 反复发生,操作员看到 menu 10 显示"未创建"会以为是新 bug。
+    if [[ -f "${DB_FILE}" ]]; then
+        local username
+        username=$("${INSTALL_DIR}/${CMD_NAME}" setting -show 2>/dev/null \
+            | awk -F': *' '/^  username:/{print $2; exit}')
+        if [[ -n "${username}" && "${username}" != "(未创建)" ]]; then
+            ok "admin user: ${username}"
+        else
+            err "admin user 未创建 — RunFirstRunSetup 没把首装 admin 写进 users 表"
+            echo -e "    ${C}修复:${N} ${C}${CMD_NAME} reset${N} 强制重新生成"
+            fail=$((fail+1))
+        fi
+    fi
+
     echo
     if [[ ${fail} -eq 0 ]]; then ok "all good"; return 0
-    else err "${fail} 项问题;${C}journalctl -u ${SERVICE_NAME} -n 200${N} 查看日志"; return 1
+    else err "${fail} 项问题;${C}journalctl -u ${SERVICE_NAME} -n 200${N} 查看完整日志"; return 1
     fi
 }
 

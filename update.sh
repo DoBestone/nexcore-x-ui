@@ -151,6 +151,30 @@ if [[ -d "${TMP}/${CMD_NAME}/bin" ]]; then
     [[ -n "${keep}" ]] && cp "${keep}" "${INSTALL_DIR}/bin/config.json"
 fi
 
+# Refresh systemd unit if release tarball ships a newer one. Pre-v2.1.2,
+# update.sh deliberately did NOT touch the unit file to preserve any
+# operator-side Environment= or hardening tweaks. But that policy made
+# v2.1.2's SystemCallFilter relaxation (the fix for SIGSYS-on-clone3) un-
+# rollable via update.sh — operators were stuck on a unit file that
+# core-dumped the panel under systemd until they re-ran install.sh.
+#
+# Compromise: drop-ins remain the operator's customization surface (they
+# live under .service.d/ and are NEVER touched here). Only the parent
+# unit gets refreshed, with a timestamped backup so a bad release can be
+# diagnosed by `diff` against the previous version.
+NEW_UNIT="${TMP}/${CMD_NAME}/${CMD_NAME}.service"
+if [[ -f "${NEW_UNIT}" ]] && ! diff -q "${NEW_UNIT}" "${SERVICE_FILE}" >/dev/null 2>&1; then
+    echo -e "${green}更新 systemd unit 文件 (备份旧版本到 ${SERVICE_FILE}.bak)…${plain}"
+    cp -a "${SERVICE_FILE}" "${SERVICE_FILE}.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    install -m 0644 "${NEW_UNIT}" "${SERVICE_FILE}"
+    systemctl daemon-reload
+    # reset-failed wipes the "auto-restart" failure counter that built up
+    # during the SIGSYS crash loop on the old unit. Without it, the next
+    # `systemctl start` may still see the unit in a degraded
+    # "start-limit-hit" state and refuse to actually launch the binary.
+    systemctl reset-failed "${SERVICE_NAME}" 2>/dev/null || true
+fi
+
 echo -e "${green}启动服务…${plain}"
 systemctl start "${SERVICE_NAME}"
 sleep 1
