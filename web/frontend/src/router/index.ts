@@ -60,6 +60,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: 'API 控制台', icon: 'Document' }
       },
       {
+        path: 'system-update',
+        name: 'system-update',
+        component: () => import('@/views/SystemUpdate.vue'),
+        meta: { title: '系统更新', icon: 'RefreshRight' }
+      },
+      {
         path: 'settings',
         name: 'settings',
         component: () => import('@/views/Settings.vue'),

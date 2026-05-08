@@ -146,6 +146,8 @@ func (a *V1Controller) register(g *gin.RouterGroup) {
 	ro.GET("/system/listening-ports", a.listeningPorts)
 	ro.GET("/system/check-port", a.checkPort)
 	ro.GET("/system/update-check", a.updateCheck)
+	ro.GET("/system/update-progress", a.updateProgress)
+	ro.GET("/system/update-releases", a.updateReleases)
 	ro.GET("/access-logs", a.listAccessLogs)
 	ro.GET("/certs", a.listCerts)
 	ro.GET("/settings", a.getSettings)
@@ -1653,6 +1655,25 @@ func (a *V1Controller) updateApply(c *gin.Context) {
 		return
 	}
 	OK(c, out)
+}
+
+func (a *V1Controller) updateProgress(c *gin.Context) {
+	OK(c, a.updateService.Progress())
+}
+
+func (a *V1Controller) updateReleases(c *gin.Context) {
+	limit := 10
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	rs, err := a.updateService.ListReleases(limit)
+	if err != nil {
+		Internal(c, "update_releases_failed", err)
+		return
+	}
+	OK(c, rs)
 }
 
 // ---------- access logs ----------

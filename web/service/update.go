@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"nexcore-x-ui/config"
+	"nexcore-x-ui/logger"
 )
 
 // maxTarballSize caps the download to avoid a malicious release filling
@@ -64,7 +65,38 @@ type UpdateService struct {
 	cacheMu    sync.Mutex
 	cachedAt   time.Time
 	cachedView *UpdateCheck
+
+	// progress 字段记录当前 ApplyLatest 的实时阶段,前端轮询展示。
+	// applyMu 同时充当"全局只允许一个并发升级"的互斥锁。
+	progressMu sync.Mutex
+	progress   ApplyProgress
+	applyMu    sync.Mutex
 }
+
+// ApplyProgress 描述一次 ApplyLatest 的实时状态。state 字段是一个有限状态
+// 机:idle → downloading → verifying → extracting → installing → restarting
+// → done(任意阶段失败转 error)。Message 给前端做人话提示,不要直接
+// 翻译错误码 — 后端给的 message 就是要直接吐到 UI 的中文。
+type ApplyProgress struct {
+	State        string `json:"state"`
+	Message      string `json:"message"`
+	TargetTag    string `json:"targetTag,omitempty"`
+	StartedAt    int64  `json:"startedAt,omitempty"`
+	UpdatedAt    int64  `json:"updatedAt,omitempty"`
+	Error        string `json:"error,omitempty"`
+	CurrentVer   string `json:"currentVersion,omitempty"`
+}
+
+const (
+	ApplyStateIdle        = "idle"
+	ApplyStateDownloading = "downloading"
+	ApplyStateVerifying   = "verifying"
+	ApplyStateExtracting  = "extracting"
+	ApplyStateInstalling  = "installing"
+	ApplyStateRestarting  = "restarting"
+	ApplyStateDone        = "done"
+	ApplyStateError       = "error"
+)
 
 type ReleaseInfo struct {
 	TagName     string    `json:"tag_name"`
@@ -120,18 +152,41 @@ func (s *UpdateService) CheckLatest() (*UpdateCheck, error) {
 }
 
 // ApplyLatest downloads the asset matching the running architecture, swaps
-// the binary in place, and asks the supervisor to restart us. Returns the
-// new version on success. The replace-and-restart sequence is:
+// the binary in place, and re-execs into the new binary. Returns the new
+// version on success. The replace-and-restart sequence is:
 //
 //  1. download tarball to /tmp
-//  2. extract to /tmp/x-ui-update-<ts>/
-//  3. rename current binary to <path>.old
-//  4. install new binary atomically
-//  5. SIGHUP self → main.go reloads the web server (panel session drops)
+//  2. verify SHA256 against checksums.txt
+//  3. extract to /tmp/x-ui-update-<ts>/
+//  4. rename current binary to <path>.old
+//  5. install new binary atomically
+//  6. syscall.Exec(newBinary) → process image is replaced in-place
 //
-// Failure between steps 3 and 4 falls back to <path>.old so we never end up
-// with no binary at all.
+// 关键修复(v2.5.x):此前 step 6 只发了 SIGHUP,main.go 的 SIGHUP handler
+// 会重建一个 web.Server 重新 Start,但 **运行的还是旧 Go 进程**。也就是说
+// 文件已经换了,内存里跑的代码没换 — 用户看到「升级成功」但版本号没变。
+// 现在改为 syscall.Exec 把整个进程映像替换成新二进制,PID 不变,systemd
+// MAINPID 跟踪不动,新的 main() 冷启动加载新代码。
+//
+// Failure between steps 4 and 5 falls back to <path>.old so we never end
+// up with no binary at all.
 func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) {
+	// 互斥:同一时刻只允许一次升级。两个浏览器同时点"立即更新"不会
+	// 半路打架(后到的会拿不到锁直接报错给用户)。
+	if !s.applyMu.TryLock() {
+		return nil, errors.New("update: 已有升级正在进行中")
+	}
+	defer s.applyMu.Unlock()
+
+	s.setProgress(ApplyProgress{
+		State:      ApplyStateDownloading,
+		Message:    "正在解析 release 信息…",
+		TargetTag:  targetVersion,
+		StartedAt:  time.Now().Unix(),
+		UpdatedAt:  time.Now().Unix(),
+		CurrentVer: config.GetVersion(),
+	})
+
 	owner, repo := repoCoordinates()
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 	if targetVersion != "" {
@@ -139,21 +194,28 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 	}
 	r, err := s.fetchRelease(url)
 	if err != nil {
+		s.failProgress("查询 release 失败:" + err.Error())
 		return nil, err
 	}
 
 	assetURL, assetName := s.pickAsset(r)
 	if assetURL == "" {
-		return nil, fmt.Errorf("no asset for arch %s in release %s", runtime.GOARCH, r.TagName)
+		err := fmt.Errorf("no asset for arch %s in release %s", runtime.GOARCH, r.TagName)
+		s.failProgress(err.Error())
+		return nil, err
 	}
+
+	s.touchProgress(ApplyStateDownloading, fmt.Sprintf("下载 %s …", assetName), r.TagName)
 
 	// Download.
 	tmpDir, err := os.MkdirTemp("", "x-ui-update-*")
 	if err != nil {
+		s.failProgress(err.Error())
 		return nil, err
 	}
 	tarballPath := filepath.Join(tmpDir, "x-ui.tar.gz")
 	if err := downloadFile(assetURL, tarballPath); err != nil {
+		s.failProgress("下载失败:" + err.Error())
 		return nil, fmt.Errorf("download: %w", err)
 	}
 
@@ -161,16 +223,21 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 	// We fail closed: any error here aborts the upgrade with the new
 	// binary never installed. checksums.txt is mandatory — a release
 	// missing it is treated as untrusted.
+	s.touchProgress(ApplyStateVerifying, "校验 SHA256…", r.TagName)
 	if err := verifyTarballChecksum(r, assetName, tarballPath); err != nil {
+		s.failProgress("校验失败:" + err.Error())
 		return nil, fmt.Errorf("verify: %w", err)
 	}
 
 	// Extract.
+	s.touchProgress(ApplyStateExtracting, "解压压缩包…", r.TagName)
 	extractedRoot := filepath.Join(tmpDir, "extracted")
 	if err := os.MkdirAll(extractedRoot, 0o755); err != nil {
+		s.failProgress(err.Error())
 		return nil, err
 	}
 	if err := extractTarGz(tarballPath, extractedRoot); err != nil {
+		s.failProgress("解压失败:" + err.Error())
 		return nil, fmt.Errorf("extract: %w", err)
 	}
 
@@ -188,8 +255,10 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 	}
 
 	// Locate the running binary so we know where to install the new one.
+	s.touchProgress(ApplyStateInstalling, "替换面板二进制…", r.TagName)
 	exe, err := os.Executable()
 	if err != nil {
+		s.failProgress(err.Error())
 		return nil, fmt.Errorf("locate self: %w", err)
 	}
 	installRoot := filepath.Dir(exe)
@@ -207,15 +276,18 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 	binDst := exe
 	binBackup := exe + ".old"
 	if _, err := os.Stat(binSrc); err != nil {
+		s.failProgress("压缩包缺少新二进制")
 		return nil, fmt.Errorf("new binary missing in tarball: %w", err)
 	}
 	_ = os.Remove(binBackup)
 	if err := os.Rename(binDst, binBackup); err != nil {
+		s.failProgress("备份当前二进制失败:" + err.Error())
 		return nil, fmt.Errorf("backup current binary: %w", err)
 	}
 	if err := copyFile(binSrc, binDst, 0o755); err != nil {
 		// rollback
 		_ = os.Rename(binBackup, binDst)
+		s.failProgress("安装新二进制失败:" + err.Error())
 		return nil, fmt.Errorf("install new binary: %w", err)
 	}
 
@@ -248,10 +320,20 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 	_ = os.Remove(binBackup)
 	_ = os.RemoveAll(tmpDir)
 
-	// Trigger panel reload.
+	// Trigger re-exec — see ApplyLatest doc for why this replaces the old
+	// SIGHUP path. 800ms gives the HTTP response time to flush to the
+	// caller before the listening socket goes away.
+	s.touchProgress(ApplyStateRestarting, "升级完成,正在重启面板…", r.TagName)
 	go func() {
-		time.Sleep(500 * time.Millisecond)
-		_ = sendSelfSIGHUP()
+		time.Sleep(800 * time.Millisecond)
+		if err := reexecSelf(); err != nil {
+			// 兜底:syscall.Exec 几乎不会失败(失败往往是新二进制不可执行
+			// /被 SELinux 拦了)。先把状态打成 error,再 fallback 到 SIGHUP
+			// 让旧版面板继续跑 — 至少 UI 不死。
+			logger.Warning("update: re-exec into new binary failed:", err)
+			s.failProgress("重启失败:" + err.Error() + "(请用 systemctl restart " + filepath.Base(exe) + " 手动重启)")
+			_ = sendSelfSIGHUP()
+		}
 	}()
 
 	return &UpdateCheck{
@@ -260,6 +342,76 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 		UpdateAvailable: false,
 		Release:         r,
 	}, nil
+}
+
+// ---------- progress / status accessors ----------
+
+// Progress 返回当前 ApplyLatest 的实时状态。前端轮询调用,1s 间隔。
+// 返回值是 snapshot,调用方拿到的对象不会被后续更新覆盖。
+func (s *UpdateService) Progress() ApplyProgress {
+	s.progressMu.Lock()
+	defer s.progressMu.Unlock()
+	return s.progress
+}
+
+func (s *UpdateService) setProgress(p ApplyProgress) {
+	s.progressMu.Lock()
+	defer s.progressMu.Unlock()
+	s.progress = p
+}
+
+func (s *UpdateService) touchProgress(state, msg, tag string) {
+	s.progressMu.Lock()
+	defer s.progressMu.Unlock()
+	s.progress.State = state
+	s.progress.Message = msg
+	if tag != "" {
+		s.progress.TargetTag = tag
+	}
+	s.progress.UpdatedAt = time.Now().Unix()
+	s.progress.Error = ""
+}
+
+func (s *UpdateService) failProgress(msg string) {
+	s.progressMu.Lock()
+	defer s.progressMu.Unlock()
+	s.progress.State = ApplyStateError
+	s.progress.Error = msg
+	s.progress.Message = msg
+	s.progress.UpdatedAt = time.Now().Unix()
+}
+
+// ListReleases 返回最近 N 条 GitHub release(给前端「更新日志」页用)。
+// limit 取 [1, 50],默认 10。返回的 ReleaseInfo 复用 Body 字段做 markdown 渲染。
+func (s *UpdateService) ListReleases(limit int) ([]*ReleaseInfo, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	owner, repo := repoCoordinates()
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=%d", owner, repo, limit)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("github api %d: %s", resp.StatusCode, string(body))
+	}
+	var list []*ReleaseInfo
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, err
+	}
+	return list, nil
 }
 
 // ---------- helpers ----------
@@ -584,11 +736,32 @@ func copyTree(src, dst string) error {
 	return nil
 }
 
-// sendSelfSIGHUP is implemented per-platform; on windows it returns an error.
+// sendSelfSIGHUP 给老路径(re-exec 失败兜底)用。SIGHUP 只重建 web.Server,
+// 不会换二进制 — 一旦走到这条路,操作员要手动 systemctl restart。
 func sendSelfSIGHUP() error {
 	p, err := os.FindProcess(os.Getpid())
 	if err != nil {
 		return err
 	}
 	return p.Signal(syscall.SIGHUP)
+}
+
+// reexecSelf 用 syscall.Exec 把当前进程映像替换成磁盘上的新二进制。
+//
+// PID 不变 — systemd MAINPID 跟踪、cgroup、seccomp filter 都跟着走;
+// 旧进程的 goroutine、文件描述符(net listener 标了 CLOEXEC,会自动关)
+// 都被丢掉。新二进制冷启动 main(),从 sqlite 重新读 setting,重新 bind 端口。
+//
+// 这是「在线更新真正生效」的关键步骤。Caller 应当在调用前已把
+// HTTP response 写出去并 flush(因为 exec 之后 socket 立刻断)。
+func reexecSelf() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	// os.Args[0] 在 systemd 下通常是绝对路径;但 ExecStart 用相对路径
+	// 时会落到 working dir。统一用 exe 替换 argv[0],保证 procfs cmdline
+	// 看起来跟前一个进程一致。
+	argv := append([]string{exe}, os.Args[1:]...)
+	return syscall.Exec(exe, argv, os.Environ())
 }

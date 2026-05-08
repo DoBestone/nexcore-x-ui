@@ -6,7 +6,11 @@ import (
 	"path"
 	"strings"
 
-	"gorm.io/driver/sqlite"
+	// glebarez/sqlite 是 gorm.io/driver/sqlite 的纯 Go 替代,底层用
+	// modernc.org/sqlite 而不是 mattn/go-sqlite3 — 这样 CGO_ENABLED=0
+	// 也能编译,产物是真正的静态二进制,不再依赖目标机的 glibc 版本。
+	// API / DSN 完全兼容,见 https://github.com/glebarez/sqlite。
+	sqlite "github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 

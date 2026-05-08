@@ -11,7 +11,8 @@ import {
   Document,
   Setting,
   User,
-  SwitchButton
+  SwitchButton,
+  RefreshRight
 } from '@element-plus/icons-vue'
 import type { ServerStatus } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
@@ -53,6 +54,7 @@ const nav: NavItem[] = [
   { path: '/domains', title: '域名绑定', icon: Link },
   { path: '/block-rules', title: '屏蔽规则', icon: Lock },
   { path: '/api-console', title: 'API 控制台', icon: Document },
+  { path: '/system-update', title: '系统更新', icon: RefreshRight },
   { path: '/settings', title: '面板设置', icon: Setting }
 ]
 

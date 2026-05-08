@@ -60,6 +60,8 @@ func (a *APIPanelController) initRouter(g *gin.RouterGroup) {
 
 	g.GET("/update/check", a.updateCheck)
 	g.POST("/update/apply", a.updateApply)
+	g.GET("/update/progress", a.updateProgress)
+	g.GET("/update/releases", a.updateReleases)
 
 	// v1.1.0 per-client traffic 面板侧:给入站详情 modal 用,session-auth。
 	// 跟 /api/v1/clients/* 镜像但不要 token,前端 ajax 直接调即可。
@@ -218,6 +220,27 @@ func (a *APIPanelController) updateApply(c *gin.Context) {
 		return
 	}
 	jsonObj(c, out, nil)
+}
+
+// updateProgress — 前端轮询拿当前升级进度。re-exec 之后这个 endpoint 暂时
+// 502/connection-refused;前端按 "几秒内连不上 = 已重启" 判定。
+func (a *APIPanelController) updateProgress(c *gin.Context) {
+	jsonObj(c, a.updateService.Progress(), nil)
+}
+
+// updateReleases — 前端「更新日志」页用,列最近 N 条 release。
+// limit 默认 10,?limit=20 可调。后端硬上限 50,过大被 clamp。
+func (a *APIPanelController) updateReleases(c *gin.Context) {
+	limit := 10
+	if v := c.Query("limit"); v != "" {
+		_, _ = fmtSscanf(v, &limit)
+	}
+	rs, err := a.updateService.ListReleases(limit)
+	if err != nil {
+		jsonObj(c, nil, err)
+		return
+	}
+	jsonObj(c, rs, nil)
 }
 
 // ---------- per-client traffic (v1.1.0) ----------

@@ -1,7 +1,8 @@
 package v2ui
 
 import (
-	"gorm.io/driver/sqlite"
+	// 同 database/db.go:用纯 Go 的 glebarez/sqlite,免 cgo 依赖。
+	sqlite "github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )

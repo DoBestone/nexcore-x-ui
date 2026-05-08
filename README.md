@@ -21,7 +21,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/
 指定版本:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/install.sh) v2.5.2
+bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/install.sh) v2.6.0
 ```
 
 安装结束后脚本会**直接打印登录信息**(随机端口 / 随机用户名 / 随机密码 /
@@ -226,7 +226,7 @@ bash <(curl -fsSL .../install.sh) --secure-entry
 ```json
 {
   "schemaVersion": "1",
-  "panelVersion": "2.5.2",
+  "panelVersion": "2.6.0",
   "timestamp": 1746696000,
   "nonce": "rnd16chars",
   "panel": {
@@ -256,7 +256,7 @@ bash <(curl -fsSL .../install.sh) --secure-entry
 Content-Type: application/json
 X-NexCore-Signature: sha256=<hmac-sha256(body, REPORT_KEY)>
 X-NexCore-Timestamp: 1746696000
-User-Agent: nexcore-x-ui-installer/2.5.2
+User-Agent: nexcore-x-ui-installer/2.6.0
 ```
 
 **接收方校验示例**(Python / FastAPI):
