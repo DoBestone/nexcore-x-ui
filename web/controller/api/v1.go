@@ -28,19 +28,42 @@ func mapInboundErr(err error, fallback string) string {
 	}
 }
 
+// mapOutboundErr does the same for OutboundService typed errors. The codes
+// are deliberately stable (callers may switch on them); fallback covers
+// anything we haven't classified — e.g. a raw GORM write failure.
+func mapOutboundErr(err error, fallback string) string {
+	switch {
+	case errors.Is(err, service.ErrOutboundNotFound):
+		return "outbound_not_found"
+	case errors.Is(err, service.ErrOutboundTagInvalid):
+		return "tag_invalid"
+	case errors.Is(err, service.ErrOutboundTagDuplicate):
+		return "tag_duplicate"
+	case errors.Is(err, service.ErrOutboundTagReserved):
+		return "tag_reserved"
+	case errors.Is(err, service.ErrOutboundProtocolUnsup):
+		return "protocol_unsupported"
+	case errors.Is(err, service.ErrOutboundInvalidJSON):
+		return "invalid_json"
+	default:
+		return fallback
+	}
+}
+
 // V1Controller exposes node-control endpoints under /api/v1.
 type V1Controller struct {
-	inboundService service.InboundService
-	xrayService    service.XrayService
-	serverService  service.ServerService
-	settingService service.SettingService
-	userService    service.UserService
-	tokenService   service.APITokenService
-	clientService  service.ClientService
-	shareService   service.ShareService
-	certService    service.CertService
-	systemService  service.SystemService
-	magicService   service.MagicTokenService
+	inboundService  service.InboundService
+	outboundService service.OutboundService
+	xrayService     service.XrayService
+	serverService   service.ServerService
+	settingService  service.SettingService
+	userService     service.UserService
+	tokenService    service.APITokenService
+	clientService   service.ClientService
+	shareService    service.ShareService
+	certService     service.CertService
+	systemService   service.SystemService
+	magicService    service.MagicTokenService
 	apiLogService        service.APILogService
 	updateService        service.UpdateService
 	blockRuleService     service.BlockRuleService
@@ -99,6 +122,9 @@ func (a *V1Controller) register(g *gin.RouterGroup) {
 	ro.GET("/inbounds", a.listInbounds)
 	ro.GET("/inbounds/:id", a.getInbound)
 	ro.GET("/inbounds/:id/clients", a.listClients)
+	ro.GET("/outbounds", a.listOutbounds)
+	ro.GET("/outbounds/:id", a.getOutbound)
+	ro.GET("/block-rules/:id", a.getBlockRule)
 	ro.GET("/traffic", a.dbTraffic)
 	ro.GET("/traffic/live", a.liveTraffic)
 	ro.GET("/online-ips", a.listOnlineIps)
@@ -128,6 +154,24 @@ func (a *V1Controller) register(g *gin.RouterGroup) {
 	api.PATCH("/inbounds/bulk-enable", a.bulkSetEnable)
 	api.POST("/inbounds/bulk-delete", a.bulkDelete)
 	api.POST("/inbounds/reset-all-traffic", a.bulkResetTraffic)
+	// 一键扫表禁用过期 / 配额耗尽的入站。镜像 /clients/disable-expired,
+	// 让业务系统在月初对账或定时任务里把"已经停服但仍 enable=true"的
+	// 入站统一关掉,避免下次 xray reload 把超额客户继续放出去。
+	api.POST("/inbounds/disable-invalid", a.disableInvalidInbounds)
+
+	// Outbound CRUD — mirrors inbound REST shape. Service layer
+	// (OutboundService) already owns validation, tag-uniqueness, and the
+	// "clear dangling outbound_tag on delete" side effect — handlers stay
+	// thin.
+	api.POST("/outbounds", a.createOutbound)
+	api.PUT("/outbounds/:id", a.updateOutbound)
+	api.PATCH("/outbounds/:id/enable", a.setOutboundEnable)
+	api.DELETE("/outbounds/:id", a.deleteOutbound)
+	api.POST("/outbounds/bulk-delete", a.bulkDeleteOutbounds)
+	// 出站连通测试 — TCP dial + 可选 TLS 握手,不动 xray 进程。前端按
+	// OutboundTestResult 直接展示;业务系统也能用来在加完中转节点后做
+	// 自动校验。
+	api.POST("/outbounds/:id/test", a.testOutbound)
 
 	api.PATCH("/settings", a.patchSettings)
 	api.POST("/settings/api-token/rotate", a.rotateAPIToken)
@@ -359,6 +403,162 @@ func (a *V1Controller) resetInboundTraffic(c *gin.Context) {
 	OK(c, in)
 }
 
+// ---------- outbound CRUD ----------
+//
+// Thin wrappers over OutboundService. xray must be reloaded after any
+// mutation: outbounds and the routing rules that bind them are stitched
+// into the live config in XrayService.GetXrayConfig — without
+// SetToNeedRestart the change sits in DB but not in the running process.
+
+func (a *V1Controller) listOutbounds(c *gin.Context) {
+	rows, err := a.outboundService.List()
+	if err != nil {
+		Internal(c, "db_error", err)
+		return
+	}
+	OK(c, rows)
+}
+
+func (a *V1Controller) getOutbound(c *gin.Context) {
+	id, ok := parseIntParam(c, "id")
+	if !ok {
+		return
+	}
+	r, err := a.outboundService.Get(id)
+	if err != nil {
+		if errors.Is(err, service.ErrOutboundNotFound) {
+			NotFound(c, "outbound_not_found", err.Error())
+			return
+		}
+		Internal(c, "db_error", err)
+		return
+	}
+	OK(c, r)
+}
+
+func (a *V1Controller) createOutbound(c *gin.Context) {
+	var r model.Outbound
+	if err := c.ShouldBindJSON(&r); err != nil {
+		BadRequest(c, "invalid_body", err.Error())
+		return
+	}
+	if err := a.outboundService.Add(&r); err != nil {
+		BadRequest(c, mapOutboundErr(err, "create_failed"), err.Error())
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	Created(c, r)
+}
+
+func (a *V1Controller) updateOutbound(c *gin.Context) {
+	id, ok := parseIntParam(c, "id")
+	if !ok {
+		return
+	}
+	var r model.Outbound
+	if err := c.ShouldBindJSON(&r); err != nil {
+		BadRequest(c, "invalid_body", err.Error())
+		return
+	}
+	r.Id = id
+	if err := a.outboundService.Update(&r); err != nil {
+		// 404 vs 400: NotFound has its own status; everything else is the
+		// caller's fault (tag mismatch, bad JSON, reserved tag, …).
+		if errors.Is(err, service.ErrOutboundNotFound) {
+			NotFound(c, "outbound_not_found", err.Error())
+			return
+		}
+		BadRequest(c, mapOutboundErr(err, "update_failed"), err.Error())
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	OK(c, r)
+}
+
+func (a *V1Controller) deleteOutbound(c *gin.Context) {
+	id, ok := parseIntParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := a.outboundService.Delete(id); err != nil {
+		if errors.Is(err, service.ErrOutboundNotFound) {
+			NotFound(c, "outbound_not_found", err.Error())
+			return
+		}
+		Internal(c, "delete_failed", err)
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	NoContent(c)
+}
+
+func (a *V1Controller) bulkDeleteOutbounds(c *gin.Context) {
+	var req struct {
+		IDs []int `json:"ids" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		BadRequest(c, "invalid_body", err.Error())
+		return
+	}
+	if len(req.IDs) > maxBulkIDs {
+		BadRequest(c, "too_many_items", "bulk size exceeds limit (max 1000)")
+		return
+	}
+	n, err := a.outboundService.DeleteMany(req.IDs)
+	if err != nil {
+		Internal(c, "delete_failed", err)
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	OK(c, gin.H{"affected": n})
+}
+
+// setOutboundEnable —— 单点 toggle,避免业务系统为了开/关一个出站
+// 必须 PUT 完整 settings/streamSettings。和 PATCH /inbounds/:id/enable 对称。
+func (a *V1Controller) setOutboundEnable(c *gin.Context) {
+	id, ok := parseIntParam(c, "id")
+	if !ok {
+		return
+	}
+	var body struct {
+		Enable *bool `json:"enable"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Enable == nil {
+		BadRequest(c, "invalid_body", "enable (boolean) is required")
+		return
+	}
+	if err := a.outboundService.SetEnable(id, *body.Enable); err != nil {
+		if errors.Is(err, service.ErrOutboundNotFound) {
+			NotFound(c, "outbound_not_found", err.Error())
+			return
+		}
+		Internal(c, "update_failed", err)
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	OK(c, gin.H{"id": id, "enable": *body.Enable})
+}
+
+// testOutbound 跑 OutboundService.TestConnectivity:5s TCP 拨号 + 可选
+// 5s TLS 握手。Reality 协议只测 TCP(伪装层会让真实 TLS 握手脱节)。
+// 不副作用 — 不写 DB,不动 xray,可重复跑。
+func (a *V1Controller) testOutbound(c *gin.Context) {
+	id, ok := parseIntParam(c, "id")
+	if !ok {
+		return
+	}
+	res, err := a.outboundService.TestConnectivity(id)
+	if err != nil {
+		if errors.Is(err, service.ErrOutboundNotFound) {
+			NotFound(c, "outbound_not_found", err.Error())
+			return
+		}
+		Internal(c, "test_failed", err)
+		return
+	}
+	OK(c, res)
+}
+
 func (a *V1Controller) dbTraffic(c *gin.Context) {
 	items, err := a.inboundService.GetAllInboundsCtx(c.Request.Context())
 	if err != nil {
@@ -424,6 +624,23 @@ func (a *V1Controller) listBlockRules(c *gin.Context) {
 	OK(c, rows)
 }
 
+func (a *V1Controller) getBlockRule(c *gin.Context) {
+	id, ok := parseIntParam(c, "id")
+	if !ok {
+		return
+	}
+	r, err := a.blockRuleService.Get(id)
+	if err != nil {
+		if errors.Is(err, service.ErrBlockRuleNotFound) {
+			NotFound(c, "block_rule_not_found", err.Error())
+			return
+		}
+		Internal(c, "db_error", err)
+		return
+	}
+	OK(c, r)
+}
+
 func (a *V1Controller) listBlockRulePresets(c *gin.Context) {
 	OK(c, a.blockRuleService.ListPresets())
 }
@@ -454,6 +671,10 @@ func (a *V1Controller) updateBlockRule(c *gin.Context) {
 	}
 	r.Id = id
 	if err := a.blockRuleService.Update(&r); err != nil {
+		if errors.Is(err, service.ErrBlockRuleNotFound) {
+			NotFound(c, "block_rule_not_found", err.Error())
+			return
+		}
 		BadRequest(c, "update_failed", err.Error())
 		return
 	}
@@ -474,6 +695,10 @@ func (a *V1Controller) setBlockRuleEnable(c *gin.Context) {
 		return
 	}
 	if err := a.blockRuleService.SetEnable(id, body.Enable); err != nil {
+		if errors.Is(err, service.ErrBlockRuleNotFound) {
+			NotFound(c, "block_rule_not_found", err.Error())
+			return
+		}
 		BadRequest(c, "toggle_failed", err.Error())
 		return
 	}
@@ -487,6 +712,10 @@ func (a *V1Controller) deleteBlockRule(c *gin.Context) {
 		return
 	}
 	if err := a.blockRuleService.Delete(id); err != nil {
+		if errors.Is(err, service.ErrBlockRuleNotFound) {
+			NotFound(c, "block_rule_not_found", err.Error())
+			return
+		}
 		BadRequest(c, "delete_failed", err.Error())
 		return
 	}
@@ -1006,6 +1235,22 @@ func (a *V1Controller) disableExpiredClients(c *gin.Context) {
 		a.xrayService.SetToNeedRestart()
 	}
 	OK(c, gin.H{"disabled": disabled, "count": len(disabled)})
+}
+
+// disableInvalidInbounds —— 入站层面的过期/超额一键回收。扫整张表,
+// 把同时满足 (enable=true) 且 (流量超限 OR 到期) 的入站置为 enable=false。
+// 跟 disableExpiredClients 互补:client-level 关单个用户,inbound-level 关
+// 整条入站(整端口下线)。返回受影响行数。
+func (a *V1Controller) disableInvalidInbounds(c *gin.Context) {
+	n, err := a.inboundService.DisableInvalidInbounds()
+	if err != nil {
+		Internal(c, "update_failed", err)
+		return
+	}
+	if n > 0 {
+		a.xrayService.SetToNeedRestart()
+	}
+	OK(c, gin.H{"affected": n})
 }
 
 // ---------- xray config / template / logs ----------

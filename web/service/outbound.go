@@ -152,6 +152,44 @@ func (s *OutboundService) Delete(id int) error {
 	return db.Delete(&model.Outbound{}, id).Error
 }
 
+// DeleteMany removes outbounds and clears any inbound.outbound_tag that
+// would otherwise dangle, in a single transaction. Mirrors the side-effect
+// from Delete(); without the bulk update the next xray reload would crash
+// on a routing rule pointing at a deleted outbound tag.
+//
+// Returns the number of outbound rows actually deleted (missing ids are
+// silently skipped — bulk callers don't usually want a partial-success
+// failure for "already gone" rows).
+func (s *OutboundService) DeleteMany(ids []int) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	db := database.GetDB()
+	var n int64
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var tags []string
+		if err := tx.Model(&model.Outbound{}).
+			Where("id IN ?", ids).
+			Pluck("tag", &tags).Error; err != nil {
+			return err
+		}
+		if len(tags) > 0 {
+			if err := tx.Model(&model.Inbound{}).
+				Where("outbound_tag IN ?", tags).
+				Update("outbound_tag", "").Error; err != nil {
+				return err
+			}
+		}
+		res := tx.Where("id IN ?", ids).Delete(&model.Outbound{})
+		if res.Error != nil {
+			return res.Error
+		}
+		n = res.RowsAffected
+		return nil
+	})
+	return n, err
+}
+
 func (s *OutboundService) validate(r *model.Outbound) error {
 	r.Tag = strings.TrimSpace(r.Tag)
 	r.Name = strings.TrimSpace(r.Name)

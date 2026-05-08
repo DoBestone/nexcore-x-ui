@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -205,14 +208,26 @@ func showSetting(show bool) {
 	if tlsEnabled {
 		scheme = "https"
 	}
-	host := listen
-	if host == "" {
-		host = autoDetectHost()
+	// URL host 选择策略:
+	//   1. listen 显式设置 → 操作员选的就是它,不动。
+	//   2. listen 空(bind any) → firstNonLoopbackIP。云主机这步常拿到
+	//      VPC 内网 IP(阿里云 172.18/X、AWS 10.X、Tencent 10.X) — 直接拼成
+	//      URL 给操作员是没用的,粘到浏览器打不开。所以再走 detectPublicIPv4
+	//      探一次公网 IP,拿到就替换。失败再退回内网 IP。
+	// 不打"请自行替换"提示 — 正常流程不该让操作员手工改输出。
+	hostBare := listen
+	if hostBare == "" {
+		hostBare = firstNonLoopbackIP()
+		if isPrivateIPv4(hostBare) {
+			if pub := detectPublicIPv4(1500 * time.Millisecond); pub != "" {
+				hostBare = pub
+			}
+		}
 	}
-	if host == "" {
-		host = "<server-ip>"
+	if hostBare == "" {
+		hostBare = "<server-ip>"
 	}
-	// host 已含端口时(autoDetectHost 拼了 :port),URL 就别再追加端口
+	host := hostBare
 	if !strings.Contains(host, ":") && port > 0 {
 		host = fmt.Sprintf("%s:%d", host, port)
 	}
@@ -498,8 +513,17 @@ func autoDetectHost() string {
 	}
 	listen, _ := settingService.GetListen()
 	if listen == "" {
-		// best-effort: pick first non-loopback IPv4
+		// best-effort: pick first non-loopback IPv4. On cloud VMs this is
+		// usually a VPC private IP (172.18/X, 10.X) — useless in a URL.
+		// detectPublicIPv4 races a few echo / metadata endpoints to find
+		// the routable address; fall back to the private IP only if
+		// everything fails so we never break offline boxes.
 		listen = firstNonLoopbackIP()
+		if isPrivateIPv4(listen) {
+			if pub := detectPublicIPv4(1500 * time.Millisecond); pub != "" {
+				listen = pub
+			}
+		}
 		if listen == "" {
 			listen = "127.0.0.1"
 		}
@@ -521,6 +545,120 @@ func firstNonLoopbackIP() string {
 			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
 				return ipnet.IP.String()
 			}
+		}
+	}
+	return ""
+}
+
+// isPrivateIPv4 reports whether the given dotted-quad sits in a non-routable
+// or NAT'd range — i.e. pasting it into a browser from outside the host's
+// network won't reach it. Catches RFC1918, CGNAT (100.64/10), link-local
+// (169.254/16), and loopback. Used to decide whether to bother probing for
+// a public IP before printing a URL.
+func isPrivateIPv4(s string) bool {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return false
+	}
+	v4 := ip.To4()
+	if v4 == nil {
+		return false
+	}
+	switch {
+	case v4[0] == 10:
+		return true
+	case v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31:
+		return true
+	case v4[0] == 192 && v4[1] == 168:
+		return true
+	case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127:
+		return true
+	case v4[0] == 169 && v4[1] == 254:
+		return true
+	case v4[0] == 127:
+		return true
+	}
+	return false
+}
+
+// detectPublicIPv4 races a handful of public-IP echo + cloud metadata
+// endpoints in parallel and returns the first valid IPv4 returned. Total
+// wall budget = timeout (slow endpoints don't extend it). Returns "" if
+// every endpoint fails (offline / firewalled / GFW).
+//
+// Endpoint mix is deliberately diverse:
+//   - Cloud metadata (Aliyun 100.100.100.200, AWS+Tencent 169.254.169.254):
+//     fast and authoritative when running on that cloud, instant TCP-RST
+//     elsewhere.  Aliyun's eipv4 path returns the EIP plain text with no
+//     auth header — perfect for this case.
+//   - HTTPS echos (api.ipify.org, checkip.amazonaws.com): work from any
+//     internet-connected host, may be slow/blocked in some regions.
+//
+// The HTTP client gets a per-request timeout equal to the full budget so
+// that the slowest survivor doesn't outlive the budget. Request bodies are
+// LimitReader-capped so a misbehaving endpoint can't pour megabytes at us.
+func detectPublicIPv4(timeout time.Duration) string {
+	endpoints := []string{
+		// Aliyun ECS: eipv4 returns the Elastic IP if one is attached;
+		// public-ipv4 covers the older "经典公网 IP" / pay-by-traffic style.
+		// Both fail fast (ECONNREFUSED / 404) elsewhere.
+		"http://100.100.100.200/latest/meta-data/eipv4",
+		"http://100.100.100.200/latest/meta-data/public-ipv4",
+		// Tencent Cloud CVM
+		"http://metadata.tencentyun.com/latest/meta-data/public-ipv4",
+		// AWS / Azure / GCP all use 169.254.169.254. AWS IMDSv2 needs a
+		// token — IMDSv1 still works on most instances; if disabled this
+		// just 401s and the HTTPS echos pick up the slack.
+		"http://169.254.169.254/latest/meta-data/public-ipv4",
+		// Generic HTTPS echos — last-resort, work from any reachable host.
+		"https://api.ipify.org",
+		"https://checkip.amazonaws.com",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	client := &http.Client{Timeout: timeout}
+	out := make(chan string, len(endpoints))
+
+	for _, ep := range endpoints {
+		go func(url string) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				out <- ""
+				return
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				out <- ""
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				out <- ""
+				return
+			}
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+			if err != nil {
+				out <- ""
+				return
+			}
+			ip := strings.TrimSpace(string(body))
+			if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() != nil && !isPrivateIPv4(ip) {
+				out <- ip
+				return
+			}
+			out <- ""
+		}(ep)
+	}
+
+	for i := 0; i < len(endpoints); i++ {
+		select {
+		case ip := <-out:
+			if ip != "" {
+				return ip
+			}
+		case <-ctx.Done():
+			return ""
 		}
 	}
 	return ""

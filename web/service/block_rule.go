@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"net"
 	"strconv"
 	"strings"
@@ -12,6 +13,11 @@ import (
 	"nexcore-x-ui/database/model"
 	"nexcore-x-ui/util/common"
 )
+
+// ErrBlockRuleNotFound is returned by Get/Update/SetEnable/Delete when the
+// id doesn't match any row. Lifted out of the raw gorm.ErrRecordNotFound so
+// the API controller can map it to 404 without importing the ORM.
+var ErrBlockRuleNotFound = errors.New("block rule not found")
 
 // 合法的规则类型集合。前端下拉框要和这里保持一致。
 var validBlockRuleTypes = map[string]bool{
@@ -160,6 +166,9 @@ func (s *BlockRuleService) Get(id int) (*model.BlockRule, error) {
 	r := &model.BlockRule{}
 	err := db.First(r, id).Error
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrBlockRuleNotFound
+		}
 		return nil, err
 	}
 	return r, nil
@@ -191,13 +200,27 @@ func (s *BlockRuleService) Update(r *model.BlockRule) error {
 }
 
 func (s *BlockRuleService) SetEnable(id int, enable bool) error {
-	return database.GetDB().Model(&model.BlockRule{}).
+	res := database.GetDB().Model(&model.BlockRule{}).
 		Where("id = ?", id).
-		Update("enable", enable).Error
+		Update("enable", enable)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrBlockRuleNotFound
+	}
+	return nil
 }
 
 func (s *BlockRuleService) Delete(id int) error {
-	return database.GetDB().Delete(&model.BlockRule{}, id).Error
+	res := database.GetDB().Delete(&model.BlockRule{}, id)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrBlockRuleNotFound
+	}
+	return nil
 }
 
 // 路由 protocol 字段在 Xray 里只支持这几个 sniffing 出来的协议名。
