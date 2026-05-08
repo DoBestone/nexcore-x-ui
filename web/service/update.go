@@ -323,9 +323,27 @@ func (s *UpdateService) ApplyLatest(targetVersion string) (*UpdateCheck, error) 
 	// Trigger re-exec — see ApplyLatest doc for why this replaces the old
 	// SIGHUP path. 800ms gives the HTTP response time to flush to the
 	// caller before the listening socket goes away.
+	//
+	// 关键:必须先把 xray 子进程 SIGTERM 掉再 exec。xray 是 panel 的子进程,
+	// kernel 在 execve 时不会终结子进程 — 不显式 stop 的话,exec 之后老
+	// xray 还活着占着 inbound 端口,新 panel main() 启动时再去 spawn xray
+	// 直接 EADDRINUSE,UI 看到的就是「xray 报错 + 版本没变」(因为 panel
+	// 自己倒是新二进制,但 xray 起不来用户感知就是更新失败)。这是 v2.6.0
+	// 在线更新在生产环境第一次实战暴露的 bug,补在 v2.6.2。
 	s.touchProgress(ApplyStateRestarting, "升级完成,正在重启面板…", r.TagName)
 	go func() {
 		time.Sleep(800 * time.Millisecond)
+
+		// XrayService 是无状态零值结构 — 内部走包级 var p *xray.Process
+		// 拿到当前运行的 xray handle。Stop() 内置 SIGTERM + 5s grace +
+		// SIGKILL fallback,返回时 xray 进程已 reap,端口已释放。
+		// "xray is not running" 是预期的良性错误(更新前用户已手动停了
+		// xray),其它错误也只能 best-effort 继续 — exec 推进比卡住强。
+		xs := XrayService{}
+		if err := xs.StopXray(); err != nil && !strings.Contains(err.Error(), "not running") {
+			logger.Warning("update: stop xray before re-exec failed:", err)
+		}
+
 		if err := reexecSelf(); err != nil {
 			// 兜底:syscall.Exec 几乎不会失败(失败往往是新二进制不可执行
 			// /被 SELinux 拦了)。先把状态打成 error,再 fallback 到 SIGHUP
