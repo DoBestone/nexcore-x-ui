@@ -102,6 +102,17 @@ async function doLogout() {
           <span>{{ n.title }}</span>
         </a>
       </nav>
+      <!-- 侧栏赞助卡:项目方同品牌 9188.pro 综合数字基础服务平台。
+           不打 banner 喊话,保持冷调小卡,链接外开。-->
+      <a
+        href="https://9188.pro/?utm_source=nexcore-panel&utm_medium=sidebar"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="side-sponsor"
+      >
+        <div class="side-sponsor-title">NexCore · 9188.pro</div>
+        <div class="side-sponsor-sub">VPS · 域名 · 主机托管</div>
+      </a>
       <div class="side-foot">
         <div class="user">
           <el-icon><User /></el-icon>
@@ -195,8 +206,37 @@ async function doLogout() {
   font-weight: 500;
 }
 
+.side-sponsor {
+  display: block;
+  margin: 8px 12px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #f5f8ff 0%, #eef2ff 100%);
+  border: 1px solid #dfe7ff;
+  text-decoration: none;
+  color: var(--nx-text);
+  transition: background 0.15s, transform 0.05s;
+}
+.side-sponsor:hover {
+  background: linear-gradient(135deg, #eef2ff 0%, #dbeafe 100%);
+}
+.side-sponsor:active {
+  transform: scale(0.99);
+}
+.side-sponsor-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--nx-primary);
+  margin-bottom: 2px;
+}
+.side-sponsor-sub {
+  font-size: 11px;
+  color: var(--nx-text-soft);
+}
+
 .side-foot {
   padding: 12px 16px;
+  margin-top: 8px;
   border-top: 1px solid var(--nx-border);
   display: flex;
   align-items: center;

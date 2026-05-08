@@ -283,6 +283,47 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
+      <!-- 项目信息卡:版本号 + 开源仓库链接。GitHub URL 硬编码,版本号从
+           /server/status 拿(后端从 config/version 嵌入,build 时同步)。
+           不调 GitHub API 列 stars/issues — 那要 CORS + token,网速一抖
+           整个 Dashboard 加载就被拖,不值得。 -->
+      <div class="nx-card project">
+        <div class="card-title">项目信息</div>
+        <div class="kv">
+          <span>面板版本</span>
+          <b>{{ status?.panelVersion ? 'v' + status.panelVersion : '-' }}</b>
+        </div>
+        <div class="kv">
+          <span>开源仓库</span>
+          <b>
+            <a
+              href="https://github.com/DoBestone/nexcore-x-ui"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="repo-link"
+            >DoBestone/nexcore-x-ui ↗</a>
+          </b>
+        </div>
+        <div class="muted project-foot">
+          MIT 协议,issue / PR 欢迎。
+        </div>
+      </div>
+
+      <!-- 项目方商业站点 — NexCore 同品牌的 9188.pro 综合数字基础服务平台
+           (VPS / 域名 / 主机托管)。链接外开,不写访客追踪参数。
+           保持中性文案,不喊"立即抢购"。 -->
+      <div class="nx-card sponsor">
+        <div class="card-title">推荐 · NexCore</div>
+        <div class="sponsor-tag">VPS · 域名 · 主机托管</div>
+        <div class="muted">由项目方运营的综合数字基础服务平台,与本面板同品牌。</div>
+        <a
+          href="https://9188.pro/?utm_source=nexcore-panel&utm_medium=dashboard"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="sponsor-cta"
+        >访问 9188.pro ↗</a>
+      </div>
+
       <div class="nx-card xray">
         <div class="card-title">Xray</div>
         <div class="xray-row">
@@ -447,6 +488,46 @@ onBeforeUnmount(() => {
 
 .xray {
   grid-column: span 2;
+}
+
+/* 项目信息卡:GitHub 链接保持文字色 + 下划线悬浮,跟内容卡同视觉权重 */
+.repo-link {
+  color: var(--nx-primary);
+  text-decoration: none;
+  font-weight: 500;
+}
+.repo-link:hover {
+  text-decoration: underline;
+}
+.project-foot {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+/* 商业推荐卡:稍微突出但不喧宾,渐变边色区分 system 卡 + 内容卡 */
+.sponsor {
+  background: linear-gradient(135deg, #f5f8ff 0%, #ffffff 100%);
+  border: 1px solid #dfe7ff;
+}
+.sponsor-tag {
+  font-size: 13px;
+  color: var(--nx-text-strong);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.sponsor-cta {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 6px 14px;
+  background: var(--nx-primary);
+  color: #fff;
+  border-radius: 6px;
+  font-size: 13px;
+  text-decoration: none;
+  transition: background 0.15s;
+}
+.sponsor-cta:hover {
+  background: #1d4ed8;
 }
 .xray-row {
   display: flex;

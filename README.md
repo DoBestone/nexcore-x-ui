@@ -12,6 +12,8 @@
 
 ## 一键安装
 
+**默认装机(不传任何参数 = 常规安装):**
+
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/install.sh)
 ```
@@ -19,24 +21,47 @@ bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/
 指定版本:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/install.sh) v1.0.0
+bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/install.sh) v2.5.2
 ```
 
-安装结束后脚本会**直接打印登录信息**(随机端口 / 随机用户名 / 随机密码),
-形如:
+安装结束后脚本会**直接打印登录信息**(随机端口 / 随机用户名 / 随机密码 /
+**首装 admin-scope API Token**),形如:
 
 ```
 ═════════════════════════════════════════════
-  NexCore x-ui 已部署,登录信息如下
+  NexCore x-ui 已部署
 ═════════════════════════════════════════════
-panel port: 38421
-username:   admin_aB3xY9
-password:   k2Lp9Qr7sW5nMx8t
+  port:           38421
+  base path:      /
+  secure entry:   (未启用)
+  TLS:            no
+  username:       admin_aB3xY9
+  → http://1.2.3.4:38421/
 
-打开: http://1.2.3.4:38421
+  首装明文密码 (★ 立即记录,后续无法回查):
+    k2Lp9Qr7sW5nMx8t
+
+  首装 API Token (admin scope, ★ 立即记录):
+    aB3...XYZ48-char-token
+  调用示例: curl -H "Authorization: Bearer <token>" http://1.2.3.4:38421/api/v1/health
 ```
 
-凭据同时会写到 `/etc/nexcore-x-ui/install-info.txt`(权限 0600),**记下后建议删除**。
+> **凭据只在 systemd journal 里,不再落盘文件**(v2.1.3+)。错过这次显示就只能
+> `nexcore-x-ui creds`(从 journal 重新捞)或 `nexcore-x-ui reset`(强制重新生成)。
+> 详见 [自动化部署 / 云厂商一键集成](#自动化部署--云厂商一键集成)。
+
+### 进阶:装机时直接打开"安全入口"
+
+加一个 24 字符随机 slug 把面板钉到 `/<slug>/` 路径下,其它路径**裸 404**(扫端口看不到登录页):
+
+```bash
+bash <(curl -fsSL .../install.sh) --secure-entry              # auto 24-char slug
+bash <(curl -fsSL .../install.sh) --secure-entry=mySecret123  # 自定 slug
+SECURE_ENTRY=1 bash <(curl -fsSL .../install.sh)              # ENV 等价
+```
+
+也可以装完后再开:`nexcore-x-ui setting -secureEntry on` (自动生成 slug),或
+`nexcore-x-ui setting -secureEntry on -secureEntryPath myCustom`。
 
 支持的 CPU 架构:`amd64` / `arm64` / `armv7` / `s390x`(linux + systemd)。
 
@@ -65,7 +90,7 @@ nexcore-x-ui uninstall             卸载(连数据一起删)
 
 ### 凭据 / 端口
 ```text
-nexcore-x-ui creds | info          显示 install-info.txt
+nexcore-x-ui creds | info          从 journal 重新捞首装明文密码 + API token
 nexcore-x-ui reset                 重置账号密码 + 端口为新随机值
 nexcore-x-ui passwd <user> <pass>  改账号密码
 nexcore-x-ui port [N]              查看 / 设置面板端口
@@ -134,19 +159,28 @@ https://node.example.com/panel-login/aBc...XYZ
 | 资源 | 端点 |
 |---|---|
 | Liveness | `GET /api/v1/health` |
-| Server | `GET /api/v1/server/status` |
+| Server | `GET /api/v1/server/status`(CPU / 内存 / 磁盘 / **瞬时 B/s** / TCP/UDP 连接数 / xray 状态) |
 | xray | `GET /xray/status` · `POST /xray/restart` · `GET /xray/config` · `GET /xray/logs` · `GET\|PUT /xray/template` |
-| Inbounds | `GET\|POST /inbounds` (含 `?protocol=&enable=&page=&size=` 过滤) · CRUD by id · `POST /:id/reset-traffic` |
-| Inbounds bulk | `POST /inbounds/bulk` · `PATCH /inbounds/bulk-enable` · `POST /inbounds/bulk-delete` · `POST /inbounds/reset-all-traffic` |
-| Clients | `/inbounds/:id/clients` CRUD by email |
-| Share | `GET /inbounds/:id/links?host=...` · `GET /subscription?host=...` |
-| Traffic | `GET /traffic` · `GET /traffic/live` |
-| Tokens | `/tokens` CRUD + `/:id/revoke` |
+| Inbounds | `GET\|POST /inbounds` (含 `?protocol=&enable=&page=&size=` 过滤) · `GET\|PUT\|DELETE /inbounds/:id` · `PATCH /inbounds/:id/enable` · `POST /:id/reset-traffic` |
+| Inbounds bulk | `POST /inbounds/bulk` · `PATCH /inbounds/bulk-enable` · `POST /inbounds/bulk-delete` · `POST /inbounds/reset-all-traffic` · `POST /inbounds/disable-invalid`(扫表禁用过期/超额) |
+| Outbounds | `GET\|POST /outbounds` · `GET\|PUT\|DELETE /outbounds/:id` · `PATCH /outbounds/:id/enable` · `POST /outbounds/:id/test`(TCP+TLS 连通测试) · `POST /outbounds/bulk-delete` |
+| Block rules | `GET\|POST /block-rules` · `GET\|PUT\|DELETE /block-rules/:id` · `PATCH /block-rules/:id/enable` · `GET /block-rules/presets` · `POST /block-rules/apply-preset` |
+| Clients | `/inbounds/:id/clients` CRUD by email · `GET /inbounds/:id/client-traffics` · `GET /clients/:email/traffic` · `POST /clients/:email/reset-traffic` · `PATCH /clients/:email/limits` · `PATCH /clients/:email/enable` · `POST /clients/disable-expired` |
+| Share | `GET /inbounds/:id/links?host=...` · `GET /subscription?host=...` · `GET /inbounds/:id/subscription` |
+| Traffic | `GET /traffic` · `GET /traffic/live` · `GET /online-ips` · `GET /online-ips-by-email` · `GET /online-ips/:tag` |
+| Tokens | `GET\|POST /tokens` · `PATCH /tokens/:id`(rename) · `POST /tokens/:id/revoke` · `DELETE /tokens/:id` |
 | Magic | `POST /login-tokens` |
 | Settings | `GET\|PATCH /settings` · `POST /settings/api-token/rotate` |
 | Certs | `GET\|POST /certs` · `DELETE /certs/:name` |
 | System | `/system/listening-ports` · `/system/check-port?port=N` · `POST /system/restart-panel` · `GET /system/update-check` · `POST /system/update-apply` |
 | Access logs | `GET\|DELETE /access-logs` |
+
+**Scope 分级**(token 创建时指定):
+- `subscription` — 只能调订阅 / 分享链接,适合给客户端订阅 URL
+- `readonly` — 加上所有 GET(状态、入站列表、流量等)
+- `admin`(默认)— 全部端点,包括 POST/PUT/DELETE/PATCH
+
+完整 schema、请求/响应字段、错误码参见 [docs/API.md](docs/API.md)。
 
 认证:`Authorization: Bearer <token>` / `X-API-Token: <token>` / `?api_token=...`。
 Token 通过面板创建(API 控制台)或在节点上 `nexcore-x-ui` 命令行获取。
@@ -175,6 +209,97 @@ curl -H "Authorization: Bearer $TOKEN" -X POST $BASE/inbounds/1/reset-traffic
 
 ---
 
+## 自动化部署 / 云厂商一键集成
+
+适合给云厂商控制台、Terraform 模块、自建装机调度器接入 — 装机指令传一个
+HTTPS webhook + 共享密钥,binary 装完会把**面板地址 / 公网 IP / 端口 / 安全
+入口 slug / admin 用户名密码 / API token** 一次性 HMAC-SHA256 签好 POST 出去。
+
+```bash
+REPORT_URL=https://provider.example.com/nexcore/cb \
+REPORT_KEY=shared_secret_for_hmac \
+bash <(curl -fsSL .../install.sh) --secure-entry
+```
+
+**Webhook 收到的 JSON**(schemaVersion `"1"`):
+
+```json
+{
+  "schemaVersion": "1",
+  "panelVersion": "2.5.2",
+  "timestamp": 1746696000,
+  "nonce": "rnd16chars",
+  "panel": {
+    "port": 38421,
+    "scheme": "http",
+    "basePath": "/B6h5ikplHPTubXphZq99eUsg/",
+    "secureEntryEnabled": true,
+    "secureEntryPath": "B6h5ikplHPTubXphZq99eUsg",
+    "url": "http://1.2.3.4:38421/B6h5ikplHPTubXphZq99eUsg/",
+    "apiBaseURL": "http://1.2.3.4:38421/api/v1",
+    "tls": false
+  },
+  "host": {
+    "publicIP": "1.2.3.4",
+    "privateIP": "172.18.62.37",
+    "hostname": "iZ0xi9c...",
+    "arch": "amd64"
+  },
+  "admin": { "username": "admin_aB3xY9", "password": "k2Lp9Qr7sW5nMx8t" },
+  "api":   { "token": "aB3...XYZ48-char-token", "scope": "admin" }
+}
+```
+
+**Headers:**
+
+```
+Content-Type: application/json
+X-NexCore-Signature: sha256=<hmac-sha256(body, REPORT_KEY)>
+X-NexCore-Timestamp: 1746696000
+User-Agent: nexcore-x-ui-installer/2.5.2
+```
+
+**接收方校验示例**(Python / FastAPI):
+
+```python
+import hmac, hashlib, json, time
+@app.post("/cb")
+async def cb(req: Request):
+    body = await req.body()
+    expected = "sha256=" + hmac.new(KEY.encode(), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(req.headers["X-NexCore-Signature"], expected):
+        raise HTTPException(401, "bad signature")
+    payload = json.loads(body)
+    if abs(time.time() - payload["timestamp"]) > 300:
+        raise HTTPException(401, "stale")  # 防重放
+    # ... 入库 / 推给租户控制台 ...
+    return Response(status_code=204)
+```
+
+**安全模型:**
+
+- **HTTPS 强制**(默认拒 `http://`,`--report-allow-http` 才放行,仅供 LAN 测试)
+- **HMAC-SHA256 over body**,共享密钥 `REPORT_KEY` 必须走 ENV(走 CLI 进
+  `/proc/<pid>/cmdline` → `ps` 可见 → 同机其他用户能看到密钥)
+- **没设 `REPORT_KEY` 直接拒发** — 不允许"裸明文 POST"这种反模式
+- **单次 POST、10s 超时、不重试**;失败 install.sh 用 `warn` 不 `die`,凭据
+  仍在 journal,运维可手补
+- 时间戳 + 16 字符 nonce 都进 body 一起签,接收方按 5 分钟窗口防重放
+
+**完整一行式装机指令(打开安全入口 + 推 webhook):**
+
+```bash
+REPORT_URL=https://provider.example.com/cb \
+REPORT_KEY=secret \
+SECURE_ENTRY=1 \
+bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/install.sh)
+```
+
+非首装也能复用:`nexcore-x-ui report -url https://... [-allow-http] [-timeout 10]`,
+适合做"实例扩容时把现有节点同步登记到控制面"的运维流程。
+
+---
+
 ## 在线更新
 
 面板内调:
@@ -199,9 +324,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/
 ```
 
 `update.sh` 与 `install.sh` 的区别:不动 systemd unit(保留你手工加的
-`Environment=` 等)、不重装系统依赖、不动 `/etc/nexcore-x-ui/`(数据库 +
-`install-info.txt` 完整保留),只:下载 tarball → 停服务 → 替换二进制 +
-脚本 + xray bin → 启服务。需要做完整重装请改用 `install.sh`。
+`Environment=` 等)、不重装系统依赖、不动 `/etc/nexcore-x-ui/`(数据库
+完整保留),只:下载 tarball → 停服务 → 替换二进制 + 脚本 + xray bin →
+启服务。需要做完整重装请改用 `install.sh`。
 
 更新流程:从本仓库 GitHub Releases 拉取与本机架构匹配的 tarball → 校验 →
 原子替换二进制 → SIGHUP 重启面板。失败会回滚到 `.old` 备份。
@@ -221,7 +346,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/nexcore-x-ui/main/
 | `/usr/local/nexcore-x-ui/bin/geoip.dat` / `geosite.dat` | 路由数据 |
 | `/usr/local/nexcore-x-ui/bin/config.json` | 由面板生成的运行态 xray 配置(0600) |
 | `/etc/nexcore-x-ui/nexcore-x-ui.db` | sqlite 数据库 |
-| `/etc/nexcore-x-ui/install-info.txt` | 首次安装的端口/账号/密码 |
 | `/etc/systemd/system/nexcore-x-ui.service` | systemd 单元(已加 hardening) |
 | `/usr/bin/nexcore-x-ui` | 管理 CLI(指向 `/usr/local/nexcore-x-ui/nexcore-x-ui.sh`) |
 

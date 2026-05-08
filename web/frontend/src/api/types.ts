@@ -11,6 +11,9 @@ export interface ServerStatus {
   udpCount: number
   netIO: { up: number; down: number }
   netTraffic: { sent: number; recv: number }
+  // 后端 server.go 在 v2.0.x 加的字段 — 面板自身版本(非 xray-core 版本)。
+  // Dashboard / Layout 都用它显示 build 号,免每发版手改 SPA 字符串。
+  panelVersion?: string
 }
 
 export interface DBInbound {
