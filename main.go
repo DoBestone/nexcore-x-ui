@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 	_ "unsafe"
@@ -63,18 +64,33 @@ func runWebServer() {
 	// installInfoMaxAge from the previous install it is removed here so
 	// it can't keep showing stale plaintext to anyone with shell access.
 	database.MaybeExpireInstallInfo(config.GetDBPath())
-	if info, err := database.RunFirstRunSetup(config.GetDBPath()); err != nil {
-		logger.Warning("first-run setup failed:", err)
-	} else if info.Generated {
+	info, frsErr := database.RunFirstRunSetup(config.GetDBPath())
+	// 关键不变性:只要 info.Generated == true,凭据就一定要打印,无论
+	// install-info.txt 写文件成功还是失败 — 否则操作员丢失唯一可见的明文密码,
+	// bcrypt 不可逆,只能整库重置。早期版本在 frsErr != nil 时静默吞掉 banner,
+	// 直接导致 install.sh 报"未生成"且 setting -show 显示 record not found,
+	// 整个首次安装看起来像装失败但其实只是文件写不进去。
+	if info != nil && info.Generated {
+		savedTo := info.InfoPath
+		if savedTo == "" {
+			savedTo = "(write to disk failed — record this banner NOW)"
+		}
 		fmt.Println("=================================================")
 		fmt.Println("  NexCore x-ui · first-run install info")
 		fmt.Println("=================================================")
 		fmt.Printf("  panel port: %d\n", info.Port)
 		fmt.Printf("  username:   %s\n", info.Username)
 		fmt.Printf("  password:   %s\n", info.Password)
-		fmt.Printf("  saved to:   %s\n", info.InfoPath)
+		fmt.Printf("  saved to:   %s\n", savedTo)
 		fmt.Println("  → http://<server-ip>:" + fmt.Sprint(info.Port))
 		fmt.Println("=================================================")
+	}
+	if frsErr != nil {
+		// Logged AFTER the banner so the credentials are emitted first
+		// even if a downstream sink (journald rate-limit, broken pipe)
+		// truncates output. logger.Warning routes through the same
+		// stdout/journal path as fmt.Println and is preserved by systemd.
+		logger.Warning("first-run setup degraded:", frsErr)
 	}
 
 	var server *web.Server
@@ -142,28 +158,100 @@ func resetSetting() {
 	}
 }
 
+// showSetting prints the current panel state read live from the database.
+// Designed to never panic / crash even when the DB is partially populated:
+// missing user row, missing port row, missing settings — every getter is
+// nil-checked before dereference. The output also assembles the full panel
+// URL so the operator can copy-paste straight into their browser; this is
+// what the install.sh banner and `nexcore-x-ui creds` shell command both
+// fall back to when install-info.txt is unavailable.
 func showSetting(show bool) {
-	if show {
-		settingService := service.SettingService{}
-		port, err := settingService.GetPort()
-		if err != nil {
-			fmt.Println("get current port fialed,error info:", err)
-		}
-		userService := service.UserService{}
-		userModel, err := userService.GetFirstUser()
-		if err != nil {
-			fmt.Println("get current user info failed,error info:", err)
-		}
-		username := userModel.Username
-		userpasswd := userModel.Password
-		if (username == "") || (userpasswd == "") {
-			fmt.Println("current username or password is empty")
-		}
-		fmt.Println("current pannel settings as follows:")
-		fmt.Println("username:", username)
-		fmt.Println("password: (hashed, not displayed; use `x-ui setting -username X -password Y` to reset)")
-		fmt.Println("port:", port)
+	if !show {
+		return
 	}
+	// updateSetting is the only other CLI path that runs before showSetting
+	// in `setting -show -port X` style invocations, and it already opened
+	// the DB. Avoid a second open (which on SQLite single-conn pool would
+	// leak the prior *sql.DB) by skipping when GetDB() is already non-nil.
+	if database.GetDB() == nil {
+		if err := database.InitDB(config.GetDBPath()); err != nil {
+			fmt.Println("数据库无法打开:", err)
+			fmt.Println("提示:确保 systemd 服务已启动一次,或运行 `nexcore-x-ui start`。")
+			return
+		}
+	}
+
+	settingService := service.SettingService{}
+
+	port, err := settingService.GetPort()
+	if err != nil {
+		fmt.Println("读取面板端口失败:", err)
+	}
+	listen, _ := settingService.GetListen()
+	basePath, _ := settingService.GetBasePath()
+	secureEnabled := settingService.GetSecureEntryEnabled()
+	securePath := strings.TrimSpace(settingService.GetSecureEntryPath())
+	certFile, _ := settingService.GetCertFile()
+	keyFile, _ := settingService.GetKeyFile()
+	tlsEnabled := certFile != "" && keyFile != ""
+
+	userService := service.UserService{}
+	userModel, userErr := userService.GetFirstUser()
+	username := "(未创建)"
+	if userErr == nil && userModel != nil && userModel.Username != "" {
+		username = userModel.Username
+	}
+
+	scheme := "http"
+	if tlsEnabled {
+		scheme = "https"
+	}
+	host := listen
+	if host == "" {
+		host = autoDetectHost()
+	}
+	if host == "" {
+		host = "<server-ip>"
+	}
+	// host 已含端口时(autoDetectHost 拼了 :port),URL 就别再追加端口
+	if !strings.Contains(host, ":") && port > 0 {
+		host = fmt.Sprintf("%s:%d", host, port)
+	}
+	pathSuffix := basePath
+	if !strings.HasSuffix(pathSuffix, "/") {
+		pathSuffix += "/"
+	}
+	if secureEnabled && securePath != "" {
+		pathSuffix = pathSuffix + securePath + "/"
+	}
+
+	fmt.Println("─── NexCore x-ui · 当前实时设置(read from DB) ───")
+	fmt.Printf("  port:           %d\n", port)
+	if listen == "" {
+		fmt.Println("  listen:         (any) — 默认绑定全部网卡")
+	} else {
+		fmt.Printf("  listen:         %s\n", listen)
+	}
+	fmt.Printf("  base path:      %s\n", basePath)
+	if secureEnabled && securePath != "" {
+		fmt.Printf("  secure entry:   %s  (面板只在 base+entry 下应答,扫端口看到 404)\n", securePath)
+	} else {
+		fmt.Println("  secure entry:   (未启用)")
+	}
+	if tlsEnabled {
+		fmt.Printf("  TLS:            yes  (cert=%s)\n", certFile)
+	} else {
+		fmt.Println("  TLS:            no   (面板裸 HTTP,生产建议开启)")
+	}
+	fmt.Printf("  username:       %s\n", username)
+	fmt.Println("  password:       (bcrypt 哈希存储;忘记请用 `nexcore-x-ui reset`)")
+	if userErr != nil {
+		fmt.Println("  ! 未读到 admin 用户:" + userErr.Error())
+		fmt.Println("    若是首装,等服务完全起来再试;否则 `nexcore-x-ui reset` 重新生成")
+	}
+	fmt.Println()
+	fmt.Printf("  → %s://%s%s\n", scheme, host, pathSuffix)
+	fmt.Println()
 }
 
 func updateTgbotEnableSts(status bool) {

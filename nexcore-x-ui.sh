@@ -194,32 +194,61 @@ cmd_uninstall() {
 
 cmd_creds() {
     require_installed
-    # install-info.txt 是首次启动时写入的明文凭据快照。一旦在面板内改过密码/端口,
-    # binary 会主动删除它(密码 bcrypt 单向无法回写,留着会误导)。
+    # 真理之源是 DB,install-info.txt 只是首装时一次性写入的明文密码快照。
+    # 旧实现把 install-info.txt 当作主路径,文件不在就 fallback 到 setting -show —
+    # 但 setting -show 在 binary 早期版本里遇到空用户表会 nil-deref 退出非 0,
+    # 触发 || warn 分支,操作员看到"binary 不支持 setting -show",误以为版本不对。
+    # 现在永远先 setting -show(已 panic-safe),拿到端口/URL/用户名;
+    # 然后 install-info.txt 只在存在时作为补充展示明文密码。
+    hdr "当前实际设置 (read-from-DB)"
+    "${INSTALL_DIR}/${CMD_NAME}" setting -show || \
+        warn "setting -show 返回非 0 — 看 ${C}journalctl -u ${SERVICE_NAME} -n 80${N}"
+
     if [[ -f "${INFO_FILE}" ]]; then
+        echo
+        hdr "首装明文凭据快照 (install-info.txt)"
         cat "${INFO_FILE}"
         echo
-        info "以上为首次安装快照;面板内改过密码后,该文件会被自动删除"
+        info "以上明文密码仅首装窗口期可见;在面板里改过密码后,binary 会主动删除该文件"
+        info "记录后建议立即 ${C}rm ${INFO_FILE}${N},或等 24h 自动过期清理"
     else
-        warn "install-info.txt 已不存在 — 你已经在面板里改过密码 / 端口"
-        warn "密码经 bcrypt 哈希存储,无法还原明文。忘了请用:${CMD_NAME} reset"
         echo
-        hdr "当前实际设置"
-        "${INSTALL_DIR}/${CMD_NAME}" setting -show 2>/dev/null || \
-            warn "binary 不支持 setting -show,看面板设置页"
+        warn "install-info.txt 不存在 — 你要么已经在面板里改过密码,要么从未生成过"
+        warn "密码经 bcrypt 哈希存储,无法还原明文。忘了请用:${C}${CMD_NAME} reset${N}"
     fi
 }
 
 cmd_reset() {
     require_installed
     confirm "把账号密码 + 端口重置为新随机值?" "n" || { info "已取消"; return; }
+
+    # 旧版本在缺 sqlite3 时直接 `rm -f "${DB_FILE}"` 触发首次初始化 —
+    # 看似简单,实际很危险:.db-wal / .db-shm 残留会导致 SQLite 在某些发行版
+    # 上拒绝创建新 DB(报"file is encrypted or is not a database"),
+    # 操作员看到的就是"reset 完发现 install-info.txt 没出来,面板也起不来"。
+    # 现在改为先尝试自动安装 sqlite3,失败才回退到删 DB(同时清掉 wal/shm 兄弟文件)。
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        info "sqlite3 不在 PATH — 尝试自动安装"
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -y >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y sqlite3 >/dev/null 2>&1 || true
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y sqlite >/dev/null 2>&1 || true
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y sqlite >/dev/null 2>&1 || true
+        elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache sqlite >/dev/null 2>&1 || true
+        elif command -v pacman >/dev/null 2>&1; then
+            pacman -Sy --noconfirm sqlite >/dev/null 2>&1 || true
+        fi
+    fi
+
     systemctl stop "${SERVICE_NAME}"
     rm -f "${INFO_FILE}"
+
     if command -v sqlite3 >/dev/null 2>&1; then
-        # Wrap in a single transaction so we never leave the DB in a
-        # half-cleared state (e.g. users table empty but webPort still
-        # set) which would prevent first-run setup from regenerating
-        # both. `set -e` upstream catches the sqlite3 non-zero exit.
+        # 单事务清掉 admin user + webPort 设置(其它设置保留,例如 secureEntry / TLS)。
+        # `set -e` upstream 会在 sqlite3 非 0 时停下,我们再走 catch 分支兜底。
         if ! sqlite3 "${DB_FILE}" <<'SQL'
 BEGIN;
 DELETE FROM settings WHERE key='webPort';
@@ -227,20 +256,44 @@ DELETE FROM users;
 COMMIT;
 SQL
         then
-            err "数据库重置失败 — 检查 ${DB_FILE} 是否完整"
+            err "sqlite3 事务执行失败 — DB 可能已损坏:${DB_FILE}"
+            warn "建议:${C}${CMD_NAME} backup${N} 备份后,${C}rm ${DB_FILE}*${N} 整库重建(会丢所有 inbound)"
             systemctl start "${SERVICE_NAME}"
             return 1
         fi
+        ok "已清掉 admin user + webPort 设置(其余设置保留)"
     else
-        warn "sqlite3 不存在,直接删除整库以触发首次初始化"
-        rm -f "${DB_FILE}"
+        warn "sqlite3 自动安装失败 — fallback 到整库删除(包含 .db-wal / .db-shm 兄弟文件)"
+        warn "副作用:所有 inbound / outbound / 流量统计 / API token 都会一同丢失"
+        confirm "继续整库删除?" "n" || { info "已取消";  systemctl start "${SERVICE_NAME}"; return 1; }
+        rm -f "${DB_FILE}" "${DB_FILE}-wal" "${DB_FILE}-shm" "${DB_FILE}-journal"
     fi
+
     systemctl start "${SERVICE_NAME}"
-    sleep 2
+
+    # 主动等到面板起来 + admin 用户重新落库,而不是裸 sleep 2。
+    info "等待面板重新初始化…"
+    for i in $(seq 1 30); do
+        if [[ -f "${INFO_FILE}" ]]; then break; fi
+        if "${INSTALL_DIR}/${CMD_NAME}" setting -show 2>/dev/null \
+                | awk -F': *' '/^  username:/{print $2}' \
+                | grep -qvE '^\(未创建\)|^$'; then
+            break
+        fi
+        sleep 1
+    done
+
     if [[ -f "${INFO_FILE}" ]]; then
         cat "${INFO_FILE}"
+        echo
+        info "记录后建议立即 ${C}rm ${INFO_FILE}${N}"
     else
-        warn "未生成 install-info.txt — 用 'journalctl -u ${SERVICE_NAME} -n 50' 查看启动日志"
+        warn "install-info.txt 仍未生成 — 凭据落在了 journal 里"
+        echo
+        info "找新密码:${C}journalctl -u ${SERVICE_NAME} -n 80 | grep -E 'username|password|panel port'${N}"
+        echo
+        hdr "DB 实时状态"
+        "${INSTALL_DIR}/${CMD_NAME}" setting -show || true
     fi
 }
 

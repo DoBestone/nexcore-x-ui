@@ -83,8 +83,24 @@ func RunFirstRunSetup(dbPath string) (*FirstRunInfo, error) {
 		info.Port = currentPort
 	}
 
+	// install-info.txt is a *convenience snapshot* — operators love being
+	// able to `cat` the file rather than scrape journalctl. But the actual
+	// source of truth is the DB row we just wrote (admin user) and the
+	// fact that GetFirstUser will return that user from now on.
+	//
+	// Earlier versions returned (info, err) on file-write failure, which
+	// caused the runWebServer caller to skip the credentials banner
+	// entirely — leaving operators with NO way to recover the random
+	// password short of running `nexcore-x-ui reset`. We now degrade
+	// gracefully: file-write failure is logged but does not poison
+	// info.Generated, so the caller still prints the banner to stdout
+	// (which systemd captures into journalctl, where it is greppable).
 	if err := writeInstallInfo(dbPath, info); err != nil {
-		return info, err
+		// Caller logs to logger; we annotate the info path so the banner
+		// can show "(write to disk failed; this banner is the only copy)"
+		// and the operator knows to record it now.
+		info.InfoPath = ""
+		return info, fmt.Errorf("write install-info.txt failed (banner is the only copy of the password): %w", err)
 	}
 	return info, nil
 }
